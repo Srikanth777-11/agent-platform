@@ -9,7 +9,10 @@ version: "3.9"
 # Does NOT touch the production stack (ports 8080-8086)
 # Uses separate containers (dev-*), volume (pgdata-dev),
 # network (agent-net-dev) and image tags (:dev)
+# Project name is isolated via 'name' to avoid conflicts
 # ─────────────────────────────────────────────────────
+
+name: agent-platform-dev
 
 volumes:
   pgdata-dev:
