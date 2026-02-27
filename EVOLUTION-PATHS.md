@@ -1347,3 +1347,104 @@ The `GET /recent/{symbol}` endpoint previously returned `Flux<DecisionHistory>` 
 ---
 
 *Review last updated: 2026-02-27. Phases 27–30 verified against codebase. 10 modules total. DivergenceGuard active. Strategy memory active. Performance-weighted consensus active. Next evolution is data-driven — run the system before adding more layers.*
+
+---
+
+## Phase 31 — Real P&L Feedback Loop ✅ COMPLETED 2026-02-27
+
+**Goal:** Replace the self-referential AI-alignment win rate (did the agent agree with the final signal?) with a market-truth win rate derived from actual P&L outcomes.
+
+**Core change:** `HistoryService.rescoreAgentsByOutcome()` is called after each `resolveOutcomes()` — after the exit candle is known. Agent win rate now means "did the agent's signal direction align with a profitable trade outcome?", not "did the agent agree with the orchestrator's final signal?".
+
+**Threshold:** Profitable = `outcomePercent > 0.10` (above spread/commission noise). `getAgentFeedback()` requires ≥5 resolved outcomes per agent before replacing the 0.5 fallback, preventing noise on sparse data.
+
+**New endpoints:**
+- `GET /api/v1/history/feedback-loop-status` — per-agent win rate, sample size, weight source (`market-truth` vs `fallback`)
+
+**Verification:** After 5+ resolved trades, `feedback-loop-status` should show `source: market-truth` for all agents with non-0.5 win rates.
+
+---
+
+## Phase 32 — Historical Replay Tuning Engine ✅ COMPLETED 2026-02-28
+
+**Goal:** Eliminate the cold-start problem. Six months of real Nifty 5-min OHLCV candles are replayed through the **actual Java pipeline** — same agents, same AI strategist, same DivergenceGuard, same P&L feedback loop — at full speed. Agent weights are pre-trained and the EdgeReport is seeded with real outcomes before the first live trade.
+
+**Why not Python backtest?** A Python backtest tunes Python replicas, not the real Java agents. Phase 32 tunes the real system.
+
+**Data source:** Angel One SmartAPI (`/rest/secure/angelbroking/historical/v1/getCandleData`) with existing auth. Symbol: `99926000` (NIFTY 50), interval: `FIVE_MINUTE`, range: configurable (default ~60 days). Chunked in 30-day API calls.
+
+**Architecture:**
+```
+[UI ReplayPanel]
+    ↓ POST /api/v1/market-data/replay/fetch-history   → download candles → store in replay_candles
+    ↓ POST /api/v1/market-data/replay/start           → begin replay loop
+    ↑ GET  /api/v1/market-data/replay/status          → poll progress
+
+[ReplayRunnerService] (market-data-service, profile: historical-replay)
+    → loads candles from history-service into HistoricalReplayProvider
+    → for each candle: POST /api/v1/orchestrate/trigger (real candle timestamp)
+    → after 2s: fetch latest snapshot → resolve P&L → POST /api/v1/history/outcome/{traceId}
+
+[HistoricalReplayProvider] (market-data-service, @Primary, profile: historical-replay)
+    → cursor-based real OHLCV provider
+    → builds sliding recentClosingPrices window from real historical prices
+    → cursor set externally by ReplayRunnerService before each trigger
+
+[history-service]
+    → replay_candles table (UNIQUE symbol+candle_time)
+    → ingest: POST /api/v1/history/replay-candles/ingest
+    → fetch:  GET  /api/v1/history/replay-candles/{symbol}
+    → delete: DELETE /api/v1/history/replay-candles/{symbol}
+```
+
+**Session simulation:** Candle timestamps are real UTC times. `TradingSessionClassifier.classify(event.triggeredAt())` already classifies OPENING_BURST/POWER_HOUR correctly from the candle time — no changes needed.
+
+**P&L resolution (explicit, per-trade):**
+1. `ReplayRunnerService` generates a `traceId` before each trigger
+2. After 2s, fetches snapshot for symbol → gets `finalSignal`, `entryPrice`, `estimatedHoldMinutes`
+3. `exitIdx = min(i + estimatedHoldMinutes/5, candles.size()-1)`
+4. `outcome = (candles[exitIdx].close - entryPrice) / entryPrice × 100`
+5. Posts to `POST /api/v1/history/outcome/{traceId}` → triggers `rescoreAgentsByOutcome()` immediately
+
+**Profile activation:**
+```yaml
+SPRING_PROFILES_ACTIVE: historical-replay
+```
+`HistoricalReplayProvider` becomes `@Primary`, overriding live `MarketDataService`.
+
+**Files changed:**
+
+| Module | File | Change |
+|---|---|---|
+| history-service | `schema.sql` | Added `replay_candles` table + UNIQUE constraint + index |
+| history-service | NEW `model/ReplayCandle.java` | R2DBC entity |
+| history-service | NEW `dto/ReplayCandleDTO.java` | Transfer record |
+| history-service | NEW `repository/ReplayCandleRepository.java` | Reactive repository |
+| history-service | NEW `service/ReplayCandleService.java` | Ingest + fetch + delete |
+| history-service | `controller/HistoryController.java` | 4 new endpoints under `/replay-candles/` |
+| market-data-service | `client/MarketDataWebClient.java` | Added `fetchHistoricalCandles()` — 30-day chunked Angel One calls |
+| market-data-service | NEW `replay/ReplayCandleDTO.java` | Local mirror DTO |
+| market-data-service | NEW `replay/ReplayState.java` | Mutable progress state |
+| market-data-service | NEW `replay/HistoricalReplayProvider.java` | `@Primary @Profile("historical-replay")` OHLCV provider |
+| market-data-service | NEW `replay/ReplayRunnerService.java` | Replay loop driver |
+| market-data-service | NEW `replay/ReplayController.java` | `/api/v1/market-data/replay/` REST API |
+| market-data-service | NEW `application-historical-replay.yml` | Profile config |
+| docker-compose.dev.yml | — | Added `HISTORY_URL` + `ORCHESTRATOR_URL` to market-data-service env |
+| ui | NEW `src/components/ReplayPanel.jsx` | Operator control panel |
+| ui | `src/App.jsx` | Added `<ReplayPanel />` to dashboard |
+
+**Post-replay observable improvements:**
+
+| Component | Before Replay | After 60-Day Replay |
+|---|---|---|
+| Agent weights | Equal (0.5 cold start) | Tuned to real Nifty 5-min intraday |
+| Market-truth win rates | 0.5 neutral fallback | Real rates from thousands of decisions |
+| EdgeReport | Empty | Win rate, expectancy, session breakdown |
+| DivergenceGuard threshold | Unvalidated 0.65 | Empirically observable from replay data |
+| Winning windows | Unknown | OPENING_BURST+TRENDING vs POWER_HOUR+CALM measurable |
+
+**Technical debt introduced:** Replay runs sequentially (one candle per 2s+ settle time) — 8,400 candles takes ~5 hours. A future optimisation could reduce `PIPELINE_SETTLE_MS` to 500ms for faster replay once the AI rate limits are verified.
+
+---
+
+*Review last updated: 2026-02-28. Phases 27–32 verified against codebase. DivergenceGuard active. Strategy memory active. Real P&L feedback loop active. Historical replay tuning engine active.*

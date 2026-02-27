@@ -6,6 +6,7 @@ import MomentumBanner from './components/MomentumBanner';
 import TacticalPostureHeader from './components/TacticalPostureHeader';
 import TradeReflectionPanel from './components/TradeReflectionPanel';
 import FeedbackLoopPanel from './components/FeedbackLoopPanel';
+import ReplayPanel from './components/ReplayPanel';
 
 // ── Trading session classifier (mirrors Java TradingSessionClassifier) ───────
 function getTradingSession() {
@@ -261,6 +262,9 @@ export default function App() {
 
         {/* ── Feedback Loop Status (collapsible) ──────────── */}
         <FeedbackLoopPanel agents={feedbackAgents} />
+
+        {/* ── Phase-32: Historical Replay Tuning (collapsible) ── */}
+        <ReplayPanel />
       </main>
 
       {/* ── Footer ───────────────────────────────────────────── */}

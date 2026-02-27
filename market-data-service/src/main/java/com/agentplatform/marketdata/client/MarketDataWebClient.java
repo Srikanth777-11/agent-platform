@@ -3,6 +3,7 @@ package com.agentplatform.marketdata.client;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.agentplatform.marketdata.model.MarketDataQuote;
+import com.agentplatform.marketdata.replay.ReplayCandleDTO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -145,6 +146,150 @@ public class MarketDataWebClient {
         } catch (Exception e) {
             throw new RuntimeException("Failed to parse Angel One response for symbol: " + symbol, e);
         }
+    }
+
+    // ── Phase-32: Angel One Historical Candle Fetch (configurable date range) ──
+
+    /**
+     * Fetches historical OHLCV candles from Angel One SmartAPI for a configurable
+     * date range. Automatically chunks the request into 30-day windows to avoid
+     * API timeouts. Returns candles in chronological order.
+     *
+     * @param symbol   ticker symbol (e.g. "NIFTY.NSE")
+     * @param fromDate start date (inclusive)
+     * @param toDate   end date   (inclusive)
+     * @param interval Angel One interval string (e.g. "FIVE_MINUTE")
+     * @return all candles across the requested range, oldest first
+     */
+    public Mono<List<ReplayCandleDTO>> fetchHistoricalCandles(
+            String symbol, LocalDate fromDate, LocalDate toDate, String interval) {
+
+        if (angelOneApiKey == null || angelOneApiKey.isBlank() || angelOneAuthService == null) {
+            return Mono.error(new IllegalStateException(
+                "Angel One API key not configured — cannot fetch historical candles"));
+        }
+
+        String token = symbolTokens.getOrDefault(symbol, "26000");
+        List<LocalDate[]> chunks = buildChunks(fromDate, toDate, 30);
+        log.info("[HistoricalFetch] Fetching {} 30-day chunks. symbol={} from={} to={}",
+                 chunks.size(), symbol, fromDate, toDate);
+
+        // Fetch each chunk sequentially to avoid overwhelming the API
+        return Mono.just(new ArrayList<ReplayCandleDTO>())
+            .flatMap(accumulated -> {
+                Mono<List<ReplayCandleDTO>> chain = Mono.just(accumulated);
+                for (LocalDate[] chunk : chunks) {
+                    final LocalDate chunkFrom = chunk[0];
+                    final LocalDate chunkTo   = chunk[1];
+                    chain = chain.flatMap(acc ->
+                        fetchAngelOneChunk(symbol, token, chunkFrom, chunkTo, interval)
+                            .doOnSuccess(candles -> {
+                                acc.addAll(candles);
+                                log.info("[HistoricalFetch] Chunk done. symbol={} from={} to={} candles={}",
+                                         symbol, chunkFrom, chunkTo, candles.size());
+                            })
+                            .thenReturn(acc)
+                    );
+                }
+                return chain;
+            })
+            .doOnSuccess(all -> log.info("[HistoricalFetch] Complete. symbol={} total={}", symbol, all.size()))
+            .doOnError(e -> log.error("[HistoricalFetch] Failed. symbol={}", symbol, e));
+    }
+
+    private Mono<List<ReplayCandleDTO>> fetchAngelOneChunk(
+            String symbol, String token,
+            LocalDate from, LocalDate to, String interval) {
+
+        LocalDateTime fromDt = from.atTime(9, 15);
+        LocalDateTime toDt   = to.atTime(15, 30);
+
+        Map<String, String> body = Map.of(
+            "exchange",    "NSE",
+            "symboltoken", token,
+            "interval",    interval,
+            "fromdate",    fromDt.format(AO_FMT),
+            "todate",      toDt.format(AO_FMT)
+        );
+
+        return angelOneAuthService.getToken()
+            .flatMap(jwt -> webClient.post()
+                .uri("/rest/secure/angelbroking/historical/v1/getCandleData")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer " + jwt)
+                .header("X-PrivateKey",  angelOneApiKey)
+                .header("X-UserType",    "USER")
+                .header("X-SourceID",    "WEB")
+                .bodyValue(body)
+                .retrieve()
+                .bodyToMono(String.class))
+            .map(json -> parseAngelOneHistoricalResponse(symbol, json))
+            .onErrorResume(e -> {
+                log.warn("[HistoricalFetch] Chunk error (skipping). symbol={} from={} err={}",
+                         symbol, from, e.getMessage());
+                return Mono.just(List.of());
+            });
+    }
+
+    private List<ReplayCandleDTO> parseAngelOneHistoricalResponse(String symbol, String json) {
+        try {
+            JsonNode root = objectMapper.readTree(json);
+            if (!root.path("status").asBoolean(false)) {
+                log.warn("[HistoricalFetch] API error for symbol={}: {}",
+                         symbol, root.path("message").asText());
+                return List.of();
+            }
+            JsonNode data = root.path("data");
+            if (data.isMissingNode() || !data.isArray()) return List.of();
+
+            List<ReplayCandleDTO> result = new ArrayList<>();
+            data.forEach(bar -> {
+                try {
+                    // Format: [datetime, open, high, low, close, volume]
+                    String   dt     = bar.get(0).asText();
+                    double   open   = bar.get(1).asDouble();
+                    double   high   = bar.get(2).asDouble();
+                    double   low    = bar.get(3).asDouble();
+                    double   close  = bar.get(4).asDouble();
+                    long     volume = bar.get(5).asLong();
+                    // Angel One datetime: "2024-09-12T03:47:00+05:30" or "2024-09-12 03:47"
+                    LocalDateTime candleTime = parseAngelOneDatetime(dt);
+                    result.add(new ReplayCandleDTO(symbol, candleTime, open, high, low, close, volume));
+                } catch (Exception ex) {
+                    log.debug("[HistoricalFetch] Skipping malformed candle: {}", bar);
+                }
+            });
+            return result;
+        } catch (Exception e) {
+            log.warn("[HistoricalFetch] JSON parse error for symbol={}", symbol, e);
+            return List.of();
+        }
+    }
+
+    private static final DateTimeFormatter AO_DT_PLAIN =
+        DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+
+    private LocalDateTime parseAngelOneDatetime(String dt) {
+        // Angel One returns "2024-09-12T03:47:00+05:30" (ISO with offset) or "2024-09-12 03:47" (plain)
+        try {
+            // OffsetDateTime handles "+05:30" correctly; extract LocalDateTime as-is (already IST)
+            return java.time.OffsetDateTime.parse(dt).toLocalDateTime();
+        } catch (Exception e) {
+            return LocalDateTime.parse(dt, AO_DT_PLAIN);
+        }
+    }
+
+    /** Splits [from, to] into consecutive N-day windows. */
+    private List<LocalDate[]> buildChunks(LocalDate from, LocalDate to, int chunkDays) {
+        List<LocalDate[]> chunks = new ArrayList<>();
+        LocalDate cursor = from;
+        while (!cursor.isAfter(to)) {
+            LocalDate end = cursor.plusDays(chunkDays - 1);
+            if (end.isAfter(to)) end = to;
+            chunks.add(new LocalDate[]{cursor, end});
+            cursor = end.plusDays(1);
+        }
+        return chunks;
     }
 
     // ── Alpha Vantage implementation ──────────────────────────────────────────

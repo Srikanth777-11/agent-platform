@@ -1,0 +1,12 @@
+# Activate: SPRING_PROFILES_ACTIVE=historical-replay
+# Enables Phase-32 Historical Replay Tuning Engine.
+# HistoricalReplayProvider becomes @Primary — all market data fetches
+# are served from real historical OHLCV candles stored in history-service.
+
+replay:
+  history-service-url: ${HISTORY_URL:http://localhost:8085}
+  orchestrator-url: ${ORCHESTRATOR_URL:http://localhost:8081}
+
+logging:
+  level:
+    com.agentplatform.marketdata.replay: DEBUG

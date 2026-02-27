@@ -41,6 +41,9 @@ services:
       ANGELONE_CLIENT_ID:      ${ANGELONE_CLIENT_ID:-}
       ANGELONE_PASSWORD:       ${ANGELONE_PASSWORD:-}
       ANGELONE_TOTP_SECRET:    ${ANGELONE_TOTP_SECRET:-}
+      # Phase-32: replay tuning — required when SPRING_PROFILES_ACTIVE=historical-replay
+      HISTORY_URL:             http://dev-history-service:8085
+      ORCHESTRATOR_URL:        http://dev-agent-orchestrator:8081
     networks:
       - agent-net-dev
     healthcheck:

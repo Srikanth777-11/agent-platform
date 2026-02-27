@@ -7,10 +7,12 @@ import com.agentplatform.history.dto.DecisionMetricsDTO;
 import com.agentplatform.history.dto.EdgeReportDTO;
 import com.agentplatform.history.dto.FeedbackLoopStatusDTO;
 import com.agentplatform.history.dto.MarketStateDTO;
+import com.agentplatform.history.dto.ReplayCandleDTO;
 import com.agentplatform.history.dto.SnapshotDecisionDTO;
 import com.agentplatform.history.dto.RecentDecisionMemoryDTO;
 import com.agentplatform.history.model.AgentPerformanceSnapshot;
 import com.agentplatform.history.service.HistoryService;
+import com.agentplatform.history.service.ReplayCandleService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
@@ -20,6 +22,7 @@ import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -29,9 +32,11 @@ public class HistoryController {
     private static final Logger log = LoggerFactory.getLogger(HistoryController.class);
 
     private final HistoryService historyService;
+    private final ReplayCandleService replayCandleService;
 
-    public HistoryController(HistoryService historyService) {
-        this.historyService = historyService;
+    public HistoryController(HistoryService historyService, ReplayCandleService replayCandleService) {
+        this.historyService       = historyService;
+        this.replayCandleService  = replayCandleService;
     }
 
     @PostMapping("/save")
@@ -174,6 +179,35 @@ public class HistoryController {
         return historyService.resolveOutcomes(symbol, currentPrice)
             .then(Mono.just(ResponseEntity.ok().<Void>build()))
             .doOnError(e -> log.error("Outcome resolution error. symbol={}", symbol, e));
+    }
+
+    // ── Phase-32: Replay Candles ────────────────────────────────────────────
+
+    @PostMapping("/replay-candles/ingest")
+    public Mono<ResponseEntity<Long>> ingestReplayCandles(@RequestBody List<ReplayCandleDTO> candles) {
+        log.info("Replay candle ingest requested. count={}", candles.size());
+        return replayCandleService.ingest(candles)
+            .map(ResponseEntity::ok)
+            .doOnError(e -> log.error("Replay candle ingest error", e));
+    }
+
+    @GetMapping("/replay-candles/{symbol}")
+    public Flux<ReplayCandleDTO> getReplayCandles(@PathVariable String symbol) {
+        log.info("Replay candles fetch requested. symbol={}", symbol);
+        return replayCandleService.getCandles(symbol);
+    }
+
+    @DeleteMapping("/replay-candles/{symbol}")
+    public Mono<ResponseEntity<Void>> deleteReplayCandles(@PathVariable String symbol) {
+        log.info("Replay candles delete requested. symbol={}", symbol);
+        return replayCandleService.deleteBySymbol(symbol)
+            .then(Mono.just(ResponseEntity.ok().<Void>build()))
+            .doOnError(e -> log.error("Replay candles delete error. symbol={}", symbol, e));
+    }
+
+    @GetMapping("/replay-candles/{symbol}/count")
+    public Mono<ResponseEntity<Long>> countReplayCandles(@PathVariable String symbol) {
+        return replayCandleService.getCount(symbol).map(ResponseEntity::ok);
     }
 
     @GetMapping("/health")

@@ -68,6 +68,20 @@ CREATE TABLE IF NOT EXISTS decision_metrics_projection (
     last_updated       TIMESTAMP        NOT NULL DEFAULT NOW()
 );
 
+-- Phase-32: Historical OHLCV candles for replay tuning
+CREATE TABLE IF NOT EXISTS replay_candles (
+    id          BIGSERIAL PRIMARY KEY,
+    symbol      VARCHAR(20) NOT NULL,
+    candle_time TIMESTAMP NOT NULL,
+    open        DOUBLE PRECISION NOT NULL,
+    high        DOUBLE PRECISION NOT NULL,
+    low         DOUBLE PRECISION NOT NULL,
+    close       DOUBLE PRECISION NOT NULL,
+    volume      BIGINT NOT NULL,
+    UNIQUE (symbol, candle_time)
+);
+CREATE INDEX IF NOT EXISTS idx_replay_candles_symbol_time ON replay_candles (symbol, candle_time ASC);
+
 -- Operator trade awareness (no pipeline linkage)
 CREATE TABLE IF NOT EXISTS trade_sessions (
     id               BIGSERIAL        PRIMARY KEY,
