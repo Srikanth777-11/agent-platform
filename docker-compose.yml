@@ -33,6 +33,10 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE:  ${SPRING_PROFILES_ACTIVE:-}
       ALPHA_VANTAGE_API_KEY:   ${ALPHA_VANTAGE_API_KEY:-}
+      ANGELONE_API_KEY:        ${ANGELONE_API_KEY:-}
+      ANGELONE_CLIENT_ID:      ${ANGELONE_CLIENT_ID:-}
+      ANGELONE_PASSWORD:       ${ANGELONE_PASSWORD:-}
+      ANGELONE_TOTP_SECRET:    ${ANGELONE_TOTP_SECRET:-}
     networks:
       - agent-net
     healthcheck:

@@ -16,6 +16,17 @@ alpha-vantage:
   base-url: https://www.alphavantage.co
   api-key: ${ALPHA_VANTAGE_API_KEY:demo}
 
+angel-one:
+  base-url: https://apiconnect.angelone.in
+  api-key: ${ANGELONE_API_KEY:}
+  client-id: ${ANGELONE_CLIENT_ID:}
+  password: ${ANGELONE_PASSWORD:}
+  totp-secret: ${ANGELONE_TOTP_SECRET:}
+  symbol-tokens:
+    NIFTY.NSE: "26000"
+    NIFTYBEES.NSE: "1594"
+    NIFTYBEES.BSE: "1594"
+
 management:
   endpoints:
     web:

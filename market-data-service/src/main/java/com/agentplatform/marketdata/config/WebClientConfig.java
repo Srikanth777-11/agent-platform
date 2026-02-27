@@ -50,6 +50,15 @@ public class WebClientConfig {
         return new MarketDataWebClient(marketDataWebClient, objectMapper);
     }
 
+    // ── Angel One auth client (separate bean — base URL is the same Angel One host) ──
+    @Value("${angel-one.base-url:https://apiconnect.angelone.in}")
+    private String angelOneBaseUrl;
+
+    @Bean
+    public WebClient angelOneAuthClient(WebClient.Builder builder) {
+        return builder.baseUrl(angelOneBaseUrl).build();
+    }
+
     private ExchangeFilterFunction retryFilter() {
         return ExchangeFilterFunction.ofResponseProcessor(clientResponse -> {
             if (clientResponse.statusCode().is5xxServerError()) {
