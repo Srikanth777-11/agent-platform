@@ -9,6 +9,7 @@ import com.agentplatform.common.model.MarketState;
 import com.agentplatform.common.momentum.MomentumStateCalculator;
 import com.agentplatform.history.dto.DecisionMetricsDTO;
 import com.agentplatform.history.dto.EdgeReportDTO;
+import com.agentplatform.history.dto.FeedbackLoopStatusDTO;
 import com.agentplatform.history.dto.MarketStateDTO;
 import com.agentplatform.history.dto.RecentDecisionMemoryDTO;
 import com.agentplatform.history.dto.SnapshotDecisionDTO;
@@ -283,29 +284,114 @@ public class HistoryService {
     }
 
     /**
-     * Reads pre-aggregated agent feedback from the snapshot table.
-     * Eliminates full-table scans of {@code decision_history}.
+     * Returns per-agent feedback using market-truth win rates derived from resolved
+     * P&amp;L outcomes instead of AI-alignment signal matching.
      *
-     * @return map of agentName → {@link AgentFeedback}; empty when no snapshots exist
+     * <p>Agents with ≥5 resolved outcomes use their real market win rate.
+     * Agents below that threshold receive a neutral fallback of 0.5 so they
+     * are not penalised before sufficient data exists.
+     *
+     * @return map of agentName → {@link AgentFeedback} with real win rates
      */
     public Mono<Map<String, AgentFeedback>> getAgentFeedback() {
-        return snapshotRepository.findAll()
+        return Mono.zip(
+            snapshotRepository.findAll().collectList(),
+            computeMarketTruthWinRates()
+        ).map(tuple -> {
+            List<AgentPerformanceSnapshot> snapshots = tuple.getT1();
+            Map<String, double[]> marketWinRates = tuple.getT2();
+
+            Map<String, AgentFeedback> result = new HashMap<>();
+            for (AgentPerformanceSnapshot s : snapshots) {
+                double[] wr = marketWinRates.get(s.getAgentName());
+                double winRate = (wr != null && wr[1] >= 5) ? wr[0] / wr[1] : 0.5;
+                result.put(s.getAgentName(), new AgentFeedback(
+                    s.getAgentName(),
+                    winRate,
+                    s.getAvgConfidence(),
+                    s.getAvgLatencyMs(),
+                    s.getTotalDecisions()
+                ));
+            }
+            return result;
+        })
+        .doOnSuccess(m -> log.info("Agent feedback (market-truth) computed. agents={}", m.size()))
+        .doOnError(e -> log.error("Failed to compute market-truth agent feedback", e));
+    }
+
+    /**
+     * Returns per-agent feedback loop status for operator visibility.
+     * Shows whether each agent's adaptive weight is driven by real market
+     * outcomes or the neutral fallback.
+     */
+    public Flux<FeedbackLoopStatusDTO> getFeedbackLoopStatus() {
+        return Mono.zip(
+            snapshotRepository.findAll().collectList(),
+            computeMarketTruthWinRates()
+        ).flatMapMany(tuple -> {
+            List<AgentPerformanceSnapshot> snapshots = tuple.getT1();
+            Map<String, double[]> marketWinRates = tuple.getT2();
+
+            return Flux.fromIterable(snapshots).map(s -> {
+                double[] wr = marketWinRates.get(s.getAgentName());
+                boolean hasMarketTruth = wr != null && wr[1] >= 5;
+                double winRate  = hasMarketTruth ? wr[0] / wr[1] : 0.5;
+                int sampleSize  = wr != null ? (int) wr[1] : 0;
+                String source   = hasMarketTruth ? "market-truth" : "fallback";
+                return new FeedbackLoopStatusDTO(
+                    s.getAgentName(),
+                    round(winRate),
+                    sampleSize,
+                    round(s.getHistoricalAccuracyScore()),
+                    source
+                );
+            });
+        })
+        .doOnComplete(() -> log.debug("Feedback loop status computed"))
+        .doOnError(e -> log.error("Failed to compute feedback loop status", e));
+    }
+
+    /**
+     * Scans the last 200 resolved P&amp;L outcomes and computes per-agent
+     * market-truth win rates.
+     *
+     * <p>An agent "wins" when its signal direction aligned with the actual
+     * profitable outcome (same logic as {@link #rescoreAgentsByOutcome}).
+     *
+     * @return map of agentName → double[]{wins, total}
+     */
+    private Mono<Map<String, double[]>> computeMarketTruthWinRates() {
+        return repository.findResolvedDecisions(200)
             .collectList()
-            .map(snapshots -> {
-                Map<String, AgentFeedback> result = new HashMap<>();
-                for (AgentPerformanceSnapshot s : snapshots) {
-                    result.put(s.getAgentName(), new AgentFeedback(
-                        s.getAgentName(),
-                        s.getWinRate(),
-                        s.getAvgConfidence(),
-                        s.getAvgLatencyMs(),
-                        s.getTotalDecisions()
-                    ));
+            .map(decisions -> {
+                Map<String, double[]> acc = new HashMap<>();
+                for (DecisionHistory d : decisions) {
+                    try {
+                        List<AnalysisResult> agents = objectMapper.readValue(
+                            d.getAgents(), new TypeReference<List<AnalysisResult>>() {});
+                        boolean profitable  = d.getOutcomePercent() > 0.10;
+                        String  finalSignal = d.getFinalSignal();
+
+                        for (AnalysisResult agent : agents) {
+                            acc.computeIfAbsent(agent.agentName(), k -> new double[2]);
+                            double[] a = acc.get(agent.agentName());
+                            boolean agentCorrect =
+                                ("BUY".equals(finalSignal)  &&  profitable && "BUY".equals(agent.signal()))
+                             || ("BUY".equals(finalSignal)  && !profitable && !"BUY".equals(agent.signal()))
+                             || ("SELL".equals(finalSignal) &&  profitable && "SELL".equals(agent.signal()))
+                             || ("SELL".equals(finalSignal) && !profitable && !"SELL".equals(agent.signal()));
+                            a[0] += agentCorrect ? 1.0 : 0.0;
+                            a[1] += 1.0;
+                        }
+                    } catch (Exception e) {
+                        log.warn("Skipping resolved decision in market-truth win rate computation. id={}",
+                                 d.getId(), e);
+                    }
                 }
-                return result;
-            })
-            .doOnSuccess(m -> log.info("Agent feedback read from snapshot. agents={}", m.size()))
-            .doOnError(e -> log.error("Failed to read agent feedback snapshot", e));
+                log.debug("Market-truth win rates computed from {} resolved decisions. agents={}",
+                          decisions.size(), acc.size());
+                return acc;
+            });
     }
 
     // ── Legacy aggregation (retained as private fallbacks) ──────────────────

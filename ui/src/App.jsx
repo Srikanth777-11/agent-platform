@@ -5,6 +5,7 @@ import DetailModal from './components/DetailModal';
 import MomentumBanner from './components/MomentumBanner';
 import TacticalPostureHeader from './components/TacticalPostureHeader';
 import TradeReflectionPanel from './components/TradeReflectionPanel';
+import FeedbackLoopPanel from './components/FeedbackLoopPanel';
 
 // ── Trading session classifier (mirrors Java TradingSessionClassifier) ───────
 function getTradingSession() {
@@ -32,6 +33,7 @@ const AUTO_REFRESH_SECONDS = 30;
 const SNAPSHOT_URL = '/api/v1/history/snapshot';
 const MARKET_STATE_URL = '/api/v1/history/market-state';
 const ACTIVE_TRADE_URL = '/api/v1/trade/active';
+const FEEDBACK_LOOP_URL = '/api/v1/history/feedback-loop-status';
 
 export default function App() {
   const [snapshotData, setSnapshotData] = useState([]);
@@ -43,13 +45,15 @@ export default function App() {
   const [istTime, setIstTime] = useState('');
   const [session, setSession] = useState('OFF_HOURS');
   const [countdown, setCountdown] = useState(AUTO_REFRESH_SECONDS);
+  const [feedbackAgents, setFeedbackAgents] = useState([]);
 
   const fetchSnapshot = useCallback(async () => {
     setIsRefreshing(true);
     try {
-      const [snapshotRes, stateRes] = await Promise.all([
+      const [snapshotRes, stateRes, feedbackRes] = await Promise.all([
         fetch(SNAPSHOT_URL),
         fetch(MARKET_STATE_URL).catch(() => null),
+        fetch(FEEDBACK_LOOP_URL).catch(() => null),
       ]);
 
       if (!snapshotRes.ok) throw new Error(`HTTP ${snapshotRes.status}`);
@@ -75,6 +79,10 @@ export default function App() {
             setActiveTrade(null);
           }
         }
+      }
+
+      if (feedbackRes && feedbackRes.ok) {
+        setFeedbackAgents(await feedbackRes.json());
       }
 
       setLastUpdated(new Date());
@@ -250,6 +258,9 @@ export default function App() {
 
         {/* ── Trade History (collapsible) ───────────────────── */}
         <TradeReflectionPanel />
+
+        {/* ── Feedback Loop Status (collapsible) ──────────── */}
+        <FeedbackLoopPanel agents={feedbackAgents} />
       </main>
 
       {/* ── Footer ───────────────────────────────────────────── */}

@@ -62,4 +62,19 @@ public interface DecisionHistoryRepository extends ReactiveCrudRepository<Decisi
         """)
     Flux<DecisionHistory> findRecentBySymbol(String symbol, int limit);
 
+    /**
+     * Phase-31: Returns the most recent resolved decisions across all symbols.
+     * Used to compute per-agent market-truth win rates without scanning full history.
+     */
+    @Query("""
+        SELECT * FROM decision_history
+        WHERE outcome_resolved = true
+          AND agents IS NOT NULL
+          AND outcome_percent IS NOT NULL
+          AND final_signal IN ('BUY', 'SELL')
+        ORDER BY saved_at DESC
+        LIMIT :limit
+        """)
+    Flux<DecisionHistory> findResolvedDecisions(int limit);
+
 }

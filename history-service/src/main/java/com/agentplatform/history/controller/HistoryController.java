@@ -5,6 +5,7 @@ import com.agentplatform.common.model.AgentPerformanceModel;
 import com.agentplatform.common.model.FinalDecision;
 import com.agentplatform.history.dto.DecisionMetricsDTO;
 import com.agentplatform.history.dto.EdgeReportDTO;
+import com.agentplatform.history.dto.FeedbackLoopStatusDTO;
 import com.agentplatform.history.dto.MarketStateDTO;
 import com.agentplatform.history.dto.SnapshotDecisionDTO;
 import com.agentplatform.history.dto.RecentDecisionMemoryDTO;
@@ -119,6 +120,18 @@ public class HistoryController {
         return historyService.getEdgeReport(symbol)
             .map(ResponseEntity::ok)
             .defaultIfEmpty(ResponseEntity.notFound().build());
+    }
+
+    // ── Phase-31: Feedback Loop Status ─────────────────────────────────────
+
+    /**
+     * Returns per-agent real market-truth win rate, sample size, and weight source.
+     * Use this to verify the learning loop is using real P&L outcomes, not AI alignment.
+     */
+    @GetMapping("/feedback-loop-status")
+    public Flux<FeedbackLoopStatusDTO> feedbackLoopStatus() {
+        log.info("Feedback loop status requested");
+        return historyService.getFeedbackLoopStatus();
     }
 
     // ── Phase-27: Strategy Memory ───────────────────────────────────────────
