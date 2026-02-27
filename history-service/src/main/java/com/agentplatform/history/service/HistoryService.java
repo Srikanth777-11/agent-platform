@@ -63,7 +63,9 @@ public class HistoryService {
                          h.getId(), h.getSymbol(), h.getFinalSignal(), h.getTraceId());
                 SnapshotDecisionDTO event = new SnapshotDecisionDTO(
                     h.getSymbol(), h.getFinalSignal(), h.getConfidenceScore(),
-                    h.getMarketRegime(), h.getDivergenceFlag(), h.getAiReasoning(), h.getSavedAt());
+                    h.getMarketRegime(), h.getDivergenceFlag(), h.getAiReasoning(), h.getSavedAt(),
+                    h.getTradingSession(), h.getEntryPrice(), h.getTargetPrice(),
+                    h.getStopLoss(), h.getEstimatedHoldMinutes());
                 snapshotSink.tryEmitNext(event);
             })
             .flatMap(saved -> updateProjections(decision, saved)
@@ -445,13 +447,10 @@ public class HistoryService {
     public Flux<SnapshotDecisionDTO> getLatestSnapshot() {
         return repository.findLatestPerSymbol()
             .map(h -> new SnapshotDecisionDTO(
-                h.getSymbol(),
-                h.getFinalSignal(),
-                h.getConfidenceScore(),
-                h.getMarketRegime(),
-                h.getDivergenceFlag(),
-                h.getAiReasoning(),
-                h.getSavedAt()
+                h.getSymbol(), h.getFinalSignal(), h.getConfidenceScore(),
+                h.getMarketRegime(), h.getDivergenceFlag(), h.getAiReasoning(), h.getSavedAt(),
+                h.getTradingSession(), h.getEntryPrice(), h.getTargetPrice(),
+                h.getStopLoss(), h.getEstimatedHoldMinutes()
             ))
             .doOnComplete(() -> log.debug("Snapshot query completed"))
             .doOnError(e -> log.error("Failed to fetch latest snapshot", e));
@@ -539,13 +538,10 @@ public class HistoryService {
     public Flux<SnapshotDecisionDTO> getReplayDecisions(String symbol, int limit) {
         return repository.findReplayCandles(symbol, limit)
             .map(d -> new SnapshotDecisionDTO(
-                d.getSymbol(),
-                d.getFinalSignal(),
-                d.getConfidenceScore(),
-                d.getMarketRegime(),
-                d.getDivergenceFlag(),
-                d.getAiReasoning(),
-                d.getSavedAt()));
+                d.getSymbol(), d.getFinalSignal(), d.getConfidenceScore(),
+                d.getMarketRegime(), d.getDivergenceFlag(), d.getAiReasoning(), d.getSavedAt(),
+                d.getTradingSession(), d.getEntryPrice(), d.getTargetPrice(),
+                d.getStopLoss(), d.getEstimatedHoldMinutes()));
     }
 
     // ── Phase-26: Observation Analytics ────────────────────────────────────
@@ -666,13 +662,10 @@ public class HistoryService {
         LocalDateTime since = LocalDateTime.now(java.time.ZoneOffset.UTC).minusMinutes(sinceMins);
         return repository.findUnresolvedSignals(symbol, since, 10)
             .map(d -> new SnapshotDecisionDTO(
-                d.getSymbol(),
-                d.getFinalSignal(),
-                d.getConfidenceScore(),
-                d.getMarketRegime(),
-                d.getDivergenceFlag(),
-                d.getAiReasoning(),
-                d.getSavedAt()));
+                d.getSymbol(), d.getFinalSignal(), d.getConfidenceScore(),
+                d.getMarketRegime(), d.getDivergenceFlag(), d.getAiReasoning(), d.getSavedAt(),
+                d.getTradingSession(), d.getEntryPrice(), d.getTargetPrice(),
+                d.getStopLoss(), d.getEstimatedHoldMinutes()));
     }
 
     /**

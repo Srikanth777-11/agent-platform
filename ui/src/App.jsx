@@ -6,6 +6,29 @@ import MomentumBanner from './components/MomentumBanner';
 import TacticalPostureHeader from './components/TacticalPostureHeader';
 import TradeReflectionPanel from './components/TradeReflectionPanel';
 
+// ── Trading session classifier (mirrors Java TradingSessionClassifier) ───────
+function getTradingSession() {
+  const now = new Date();
+  const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  const h = ist.getHours(), m = ist.getMinutes();
+  const mins = h * 60 + m;
+  const day  = ist.getDay(); // 0=Sun,6=Sat
+  if (day === 0 || day === 6) return 'OFF_HOURS';
+  if (mins >= 555 && mins < 600)  return 'OPENING_BURST';   // 9:15–10:00
+  if (mins >= 600 && mins < 900)  return 'MIDDAY_CONSOLIDATION'; // 10:00–15:00
+  if (mins >= 900 && mins < 930)  return 'POWER_HOUR';       // 15:00–15:30
+  return 'OFF_HOURS';
+}
+
+const SESSION_CONFIG = {
+  OPENING_BURST:        { label: 'Opening Burst',  color: 'text-emerald-400', dot: 'bg-emerald-400' },
+  POWER_HOUR:           { label: 'Power Hour',     color: 'text-amber-400',   dot: 'bg-amber-400'   },
+  MIDDAY_CONSOLIDATION: { label: 'Midday',         color: 'text-sky-400',     dot: 'bg-sky-400'     },
+  OFF_HOURS:            { label: 'Market Closed',  color: 'text-slate-500',   dot: 'bg-slate-600'   },
+};
+
+const AUTO_REFRESH_SECONDS = 30;
+
 const SNAPSHOT_URL = '/api/v1/history/snapshot';
 const MARKET_STATE_URL = '/api/v1/history/market-state';
 const ACTIVE_TRADE_URL = '/api/v1/trade/active';
@@ -17,6 +40,9 @@ export default function App() {
   const [selectedCard, setSelectedCard] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [activeTrade, setActiveTrade] = useState(null);
+  const [istTime, setIstTime] = useState('');
+  const [session, setSession] = useState('OFF_HOURS');
+  const [countdown, setCountdown] = useState(AUTO_REFRESH_SECONDS);
 
   const fetchSnapshot = useCallback(async () => {
     setIsRefreshing(true);
@@ -121,6 +147,33 @@ export default function App() {
     return () => es.close();
   }, []);
 
+  // ── Live IST clock + session + auto-refresh countdown ───────────────────
+  useEffect(() => {
+    const tick = () => {
+      const now = new Date();
+      const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+      setIstTime(ist.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }));
+      setSession(getTradingSession());
+    };
+    tick();
+    const clockInterval = setInterval(tick, 1000);
+    return () => clearInterval(clockInterval);
+  }, []);
+
+  useEffect(() => {
+    setCountdown(AUTO_REFRESH_SECONDS);
+    const interval = setInterval(() => {
+      setCountdown(prev => {
+        if (prev <= 1) {
+          fetchSnapshot();
+          return AUTO_REFRESH_SECONDS;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [fetchSnapshot]);
+
   return (
     <div className={`min-h-screen flex flex-col ${activeTrade ? 'dashboard--focus-mode' : ''}`}>
       {/* ── Top Bar ──────────────────────────────────────────── */}
@@ -134,24 +187,35 @@ export default function App() {
             </h1>
           </div>
 
-          {/* Right — Refresh + timestamp */}
-          <div className="flex items-center gap-4">
-            {lastUpdated && (
-              <span className="hidden sm:block text-xs text-slate-500 font-mono">
-                {lastUpdated.toLocaleTimeString()}
-              </span>
-            )}
+          {/* Right — Session + Clock + Auto-refresh */}
+          <div className="flex items-center gap-3">
+            {/* Session indicator */}
+            {(() => {
+              const cfg = SESSION_CONFIG[session] || SESSION_CONFIG.OFF_HOURS;
+              return (
+                <div className="hidden sm:flex items-center gap-1.5">
+                  <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot} ${session !== 'OFF_HOURS' ? 'animate-pulse' : ''}`} />
+                  <span className={`text-xs font-medium ${cfg.color}`}>{cfg.label}</span>
+                </div>
+              );
+            })()}
+
+            {/* IST Clock */}
+            <span className="hidden sm:block text-xs text-slate-500 font-mono tabular-nums">
+              {istTime} IST
+            </span>
+
+            {/* Auto-refresh button with countdown */}
             <button
-              onClick={fetchSnapshot}
+              onClick={() => { fetchSnapshot(); setCountdown(AUTO_REFRESH_SECONDS); }}
               disabled={isRefreshing}
-              className="group relative inline-flex items-center gap-2 px-4 py-2 rounded-lg
+              className="group inline-flex items-center gap-2 px-3 py-2 rounded-lg
                          bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-slate-600
-                         text-sm font-medium text-slate-200 transition-all duration-200
-                         disabled:opacity-50 disabled:cursor-not-allowed
-                         active:scale-[0.97]"
+                         text-xs font-medium text-slate-400 transition-all duration-200
+                         disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.97]"
             >
               <RefreshIcon spinning={isRefreshing} />
-              Refresh Snapshot
+              {isRefreshing ? 'Updating...' : `${countdown}s`}
             </button>
           </div>
         </div>

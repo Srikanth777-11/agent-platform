@@ -11,11 +11,17 @@ import java.time.LocalDateTime;
  * <p>One instance per symbol — always represents the most recent decision.
  */
 public record SnapshotDecisionDTO(
-    @JsonProperty("symbol")         String symbol,
-    @JsonProperty("finalSignal")    String finalSignal,
-    @JsonProperty("confidence")     double confidence,
-    @JsonProperty("marketRegime")   String marketRegime,
-    @JsonProperty("divergenceFlag") Boolean divergenceFlag,
-    @JsonProperty("aiReasoning")    String aiReasoning,
-    @JsonProperty("savedAt")        LocalDateTime savedAt
+    @JsonProperty("symbol")                String symbol,
+    @JsonProperty("finalSignal")           String finalSignal,
+    @JsonProperty("confidence")            double confidence,
+    @JsonProperty("marketRegime")          String marketRegime,
+    @JsonProperty("divergenceFlag")        Boolean divergenceFlag,
+    @JsonProperty("aiReasoning")           String aiReasoning,
+    @JsonProperty("savedAt")               LocalDateTime savedAt,
+    // v8 scalping fields
+    @JsonProperty("tradingSession")        String tradingSession,
+    @JsonProperty("entryPrice")            Double entryPrice,
+    @JsonProperty("targetPrice")           Double targetPrice,
+    @JsonProperty("stopLoss")              Double stopLoss,
+    @JsonProperty("estimatedHoldMinutes")  Integer estimatedHoldMinutes
 ) {}

@@ -43,7 +43,13 @@ export default function SnapshotCard({ data, onClick }) {
     confidence,
     marketRegime,
     divergenceFlag,
+    aiReasoning,
     savedAt,
+    tradingSession,
+    entryPrice,
+    targetPrice,
+    stopLoss,
+    estimatedHoldMinutes,
   } = data;
 
   const signal = SIGNAL_STYLES[finalSignal] || SIGNAL_STYLES.HOLD;
@@ -168,16 +174,48 @@ export default function SnapshotCard({ data, onClick }) {
           </div>
         </div>
 
-        {/* ── Footer: timestamp ─────────────────────────────── */}
+        {/* ── Entry / Target / Stop row ──────────────────────── */}
+        {(entryPrice || targetPrice || stopLoss) && (
+          <div className="flex items-center gap-3 mb-3 py-2 px-3 rounded-lg bg-slate-800/40 border border-slate-700/30">
+            {entryPrice && (
+              <PriceChip label="Entry" value={entryPrice} color="text-sky-400" />
+            )}
+            {targetPrice && (
+              <PriceChip label="Target" value={targetPrice} color="text-emerald-400" />
+            )}
+            {stopLoss && (
+              <PriceChip label="Stop" value={stopLoss} color="text-rose-400" />
+            )}
+            {estimatedHoldMinutes && (
+              <span className="ml-auto text-[10px] font-mono text-slate-500">
+                ~{estimatedHoldMinutes}m
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* ── AI Reasoning preview ───────────────────────────── */}
+        {aiReasoning && (
+          <p className="text-[11px] text-slate-500 leading-relaxed mb-3 line-clamp-2">
+            {aiReasoning}
+          </p>
+        )}
+
+        {/* ── Footer: session + timestamp ───────────────────── */}
         <div className="flex items-center justify-between pt-3 border-t border-slate-800/60">
           <span className="text-[11px] text-slate-600 font-mono">
             {timeStr}
           </span>
-          {divergenceFlag && (
-            <span className="text-[10px] font-medium text-amber-400/70 uppercase tracking-wider">
-              Divergence
-            </span>
-          )}
+          <div className="flex items-center gap-2">
+            {tradingSession && (
+              <SessionChip session={tradingSession} />
+            )}
+            {divergenceFlag && (
+              <span className="text-[10px] font-medium text-amber-400/70 uppercase tracking-wider">
+                Divergence
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
@@ -207,6 +245,33 @@ function formatTime(savedAt) {
   } catch {
     return savedAt;
   }
+}
+
+const SESSION_STYLES = {
+  OPENING_BURST:        { label: 'Opening', color: 'text-emerald-400/80', border: 'border-emerald-400/20' },
+  POWER_HOUR:           { label: 'Power Hour', color: 'text-amber-400/80', border: 'border-amber-400/20' },
+  MIDDAY_CONSOLIDATION: { label: 'Midday', color: 'text-slate-400/80', border: 'border-slate-400/20' },
+  OFF_HOURS:            { label: 'Off Hours', color: 'text-slate-500/70', border: 'border-slate-500/20' },
+};
+
+function SessionChip({ session }) {
+  const cfg = SESSION_STYLES[session] || { label: session, color: 'text-slate-500/70', border: 'border-slate-500/20' };
+  return (
+    <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${cfg.color} ${cfg.border} bg-slate-900/50`}>
+      {cfg.label}
+    </span>
+  );
+}
+
+function PriceChip({ label, value, color }) {
+  return (
+    <div className="flex flex-col items-center gap-0.5">
+      <span className="text-[9px] text-slate-600 uppercase tracking-wider">{label}</span>
+      <span className={`text-[11px] font-mono font-medium ${color}`}>
+        {value.toFixed(2)}
+      </span>
+    </div>
+  );
 }
 
 function WarningIcon() {
