@@ -3,6 +3,7 @@ package com.agentplatform.common.consensus;
 import com.agentplatform.common.model.AnalysisResult;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * Strategy contract for computing a consensus trading signal from a list of agent results.
@@ -14,7 +15,7 @@ import java.util.List;
  *   <li><b>Non-null</b>  — must always return a valid {@link ConsensusResult}</li>
  * </ul>
  *
- * <p>Current implementation: {@link DefaultWeightedConsensusStrategy} (equal agent weights).
+ * <p>Current implementation: {@link PerformanceWeightedConsensusStrategy} (adaptive agent weights).
  *
  * <p>TODO: Future implementations may use:
  * <ul>
@@ -28,10 +29,24 @@ import java.util.List;
 public interface ConsensusEngine {
 
     /**
-     * Compute a consensus result from the provided agent analysis outputs.
+     * Compute a consensus result from the provided agent analysis outputs using equal weights.
      *
      * @param results non-null, non-empty list of agent results
      * @return a {@link ConsensusResult} — never {@code null}
      */
     ConsensusResult compute(List<AnalysisResult> results);
+
+    /**
+     * Compute a consensus result using caller-supplied adaptive weights per agent.
+     * Implementations that support weighted consensus should override this method.
+     * The default delegates to {@link #compute(List)} and ignores the weights map,
+     * preserving backward compatibility for equal-weight implementations.
+     *
+     * @param results  non-null, non-empty list of agent results
+     * @param weights  adaptive weight per agentName; missing entries fall back to 1.0
+     * @return a {@link ConsensusResult} — never {@code null}
+     */
+    default ConsensusResult compute(List<AnalysisResult> results, Map<String, Double> weights) {
+        return compute(results);
+    }
 }

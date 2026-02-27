@@ -372,6 +372,10 @@ Phase 14:  MarketState + metrics -> StructureInterpreter + TradePostureInterpret
 Phase 15:  TradePosture + metrics -> AdaptiveRiskEngine -> RiskEnvelope (adaptive smoothing)
 Phase 16:  TradeService reads history -> computes risk/posture -> UI displays tactical awareness
 Phase 17:  Parallel agents + SSE push -> UI becomes interactive operator workstation with real-time awareness
+Phase 27:  Consensus guardrail uses adaptive weights — divergence now compares AI vs historically-informed signal
+Phase 28:  AI strategist receives last 3 decisions as strategy memory — detects flip-flop across cycles
+Phase 29:  DivergenceGuard applied in buildDecision() — ConsensusOverride + ConfidenceDampen rules active
+Phase 30:  DivergenceGuard confidence floor (0.50) + RecentDecisionMemoryDTO replaces entity on /recent endpoint
 ```
 
 ```
@@ -382,6 +386,7 @@ history-service:
   Phase 12:  persistence + feedback + regime + snapshot provider (to UI)
   Phase 16:  ... + decision metrics + market state provider (to trade-service)
   Phase 17:  ... + SSE snapshot stream (real-time push to UI)
+  Phase 28:  ... + /recent/{symbol} strategy memory endpoint (RecentDecisionMemoryDTO — 4-field projection)
 
 market-data-service:
   Phase 1:   pure Alpha Vantage pass-through
@@ -395,6 +400,9 @@ agent-orchestrator:
   Phase 1:   fetch -> analyze -> consensus -> persist
   Phase 6:   fetch -> classify regime -> analyze -> adaptive weights -> AI strategy -> consensus guardrail -> persist
   Phase 10:  ... + DecisionContext assembly/enrichment + divergence detection + model selection
+  Phase 27:  ... + adaptiveWeights passed to ConsensusIntegrationGuard (PerformanceWeightedConsensusStrategy active)
+  Phase 28:  ... + fetchStrategyMemory() (last 3 decisions) chained before AI evaluate; memory injected into prompt
+  Phase 29:  ... + computeDivergenceStreak() + DivergenceGuard applied in buildDecision()
 
 analysis-engine:
   Phase 1:   sequential synchronous agent dispatch
@@ -418,6 +426,9 @@ common-lib:
   Phase 20:  + CalmMood, CalmMoodInterpreter; ReflectionResult record absorbs CalmMood derivation
   Phase 21:  + ReflectionPersistence, ReflectionPersistenceCalculator; ReflectionResult carries all three cognition signals
   Phase 22:  + TradingSession, TradingSessionClassifier (session-aware signal gating)
+  Phase 27:  + PerformanceWeightedConsensusStrategy; ConsensusEngine gains compute(results, weights) default method
+  Phase 29:  + DivergenceGuard (guard package): OverrideResult record, ConsensusOverride + ConfidenceDampen rules
+  Phase 30:  + DivergenceGuard CONFIDENCE_FLOOR = 0.50 applied to ConfidenceDampen rule
 ```
 
 ---
@@ -652,19 +663,9 @@ Both services have fallbacks: `DisciplineCoach` uses rule-based thresholds, `AIS
 
 ---
 
-### Path 1: Performance-Weighted Consensus Strategy
+### ✅ COMPLETED — Path 1: Performance-Weighted Consensus Strategy
 
-**Problem it solves:** Adaptive weights are computed and persisted but `DefaultWeightedConsensusStrategy` uses equal weights. Consensus runs as a guardrail but produces a signal that ignores accumulated intelligence.
-
-**Which layer evolves:** `common-lib` (new `ConsensusEngine` implementation) + `OrchestratorConfig` (bean swap).
-
-**Implementation:** Create `PerformanceWeightedConsensusStrategy implements ConsensusEngine`. Accept `Map<String, Double>` weights from `AgentScoreCalculator` output. Replace the `@Bean` in `OrchestratorConfig`. No change to `OrchestratorService` — the `ConsensusEngine` interface already abstracts the strategy.
-
-**What changes:** `OrchestratorConfig.consensusEngine()` returns new implementation. `buildDecision()` would need to pass `adaptiveWeights` to the engine — requires adding a method to `ConsensusEngine` or passing weights through the guard.
-
-**What it enables:** A more meaningful divergence signal. Currently, divergence compares the AI strategist against equal-weight consensus. With weighted consensus, divergence would compare against a historically-informed guardrail — a stronger signal that the AI is making a genuinely contrarian call.
-
-**Risk level:** LOW. The interface seam exists. The data pipeline exists.
+**Completed in Phase 27.** `PerformanceWeightedConsensusStrategy` implements `ConsensusEngine` with adaptive per-agent weights. `ConsensusEngine` interface gained a `default compute(results, weights)` method for backward compatibility. `ConsensusIntegrationGuard` gained a `resolve(results, engine, weights)` overload. `OrchestratorConfig` bean swapped. `buildDecision()` passes `adaptiveWeights` to the guard. Divergence now compares AI against a historically-informed guardrail — a stronger signal than equal-weight comparison.
 
 ---
 
@@ -719,26 +720,9 @@ Replace `RestDecisionEventPublisher` with `KafkaDecisionPublisher`. `Orchestrato
 
 ---
 
-### Path 9: Strategy Memory Layer
+### ✅ COMPLETED — Path 9: Strategy Memory Layer
 
-**Problem it solves:** `AIStrategistService` has no memory. Each invocation sees only the current cycle's data. It cannot reference its own prior recommendations or track whether its past signals were directionally correct.
-
-**Which layer evolves:** `history-service` (new endpoint) + `agent-orchestrator` (`AIStrategistService` prompt enrichment).
-
-**Implementation:** Before calling the Anthropic API, fetch the last N `FinalDecision` records for this symbol from history-service (a new endpoint: `GET /api/v1/history/recent?symbol={symbol}&limit=5`). Include prior AI reasoning and outcomes in the prompt:
-
-```
-Your last 3 recommendations for AAPL:
-  - 10min ago: BUY (confidence=0.82) "Strong uptrend with RSI confirmation"
-  - 15min ago: HOLD (confidence=0.65) "Regime transition from CALM to TRENDING"
-  - 25min ago: HOLD (confidence=0.55) "Insufficient signal strength"
-```
-
-**What it enables:** The AI strategist can detect its own signal flip-flopping, recognize regime transitions over time, and provide more consistent recommendations. The `DecisionContext` is the natural carrier for prior decisions if expanded with a `priorDecisions` field.
-
-**What changes:** New history-service endpoint, new call in `AIStrategistService.evaluate()` pipeline (chained via `flatMap`), expanded prompt template. Optionally: `DecisionContext` gains a `List<AIStrategyDecision> priorDecisions` field.
-
-**Risk level:** MEDIUM. Increases prompt size -> increases token cost. Increases latency (extra history-service call). But the reactive pattern (`flatMap` chaining) handles it cleanly, and the history endpoint is a read-only query.
+**Completed in Phase 28 (implementation) and Phase 30 (DTO refinement).** `GET /api/v1/history/recent/{symbol}?limit=3` added to history-service, returning `Flux<RecentDecisionMemoryDTO>` (4 fields: `finalSignal`, `confidenceScore`, `divergenceFlag`, `marketRegime`). `OrchestratorService.fetchStrategyMemory()` fetches prior decisions reactively before the AI call — `onErrorResume` returns empty list so the pipeline never stalls. `AIStrategistService` gained a memory-aware `evaluate(DecisionContext, Context, List<Map>)` overload and `buildMemorySection()`. A 3-line bullet summary injected into the prompt after the session section. `DecisionContext` not modified. Phase 30 replaced `Flux<DecisionHistory>` (25+ field entity) with `RecentDecisionMemoryDTO` projection, reducing per-call payload from ~10KB to ~200 bytes.
 
 ---
 
@@ -772,19 +756,9 @@ Your last 3 recommendations for AAPL:
 
 ---
 
-### Path 12: Divergence-Triggered Safety Override
+### ✅ COMPLETED — Path 12: Divergence-Triggered Safety Override
 
-**Problem it solves:** Divergence is tracked but ignored. When the AI and consensus strongly disagree, the system could benefit from an automatic guardrail that falls back to consensus or introduces a cooldown.
-
-**Which layer evolves:** `agent-orchestrator` (`OrchestratorService.buildDecision()` or a new `DivergenceGuard` component).
-
-**Implementation:** When `divergenceFlag = true` and `consensus.normalizedConfidence > HIGH_THRESHOLD`, override the AI signal with the consensus signal. Or: when divergence has occurred in N of the last M decisions, reduce the AI strategist's confidence score by a dampening factor.
-
-**What it enables:** Self-correcting behavior when the AI strategist consistently disagrees with the statistical consensus. The divergence history in PostgreSQL provides the data needed to detect patterns.
-
-**What changes:** A few lines in `buildDecision()` or a new guard class. The `divergenceFlag` and historical divergence data are already available.
-
-**Risk level:** MEDIUM. The override policy must be carefully tuned — too aggressive and the AI is effectively silenced; too lenient and divergence tracking is just observability.
+**Completed in Phase 29 (implementation) and Phase 30 (confidence floor refinement).** `DivergenceGuard` added to `common-lib/guard`. Two rules: **Rule 1 (ConsensusOverride)** — when `divergenceFlag = true` AND `consensusConfidence ≥ 0.65`, AI signal replaced with consensus signal; **Rule 2 (ConfidenceDampen)** — when `divergenceFlag = true` AND `recentDivergenceStreak ≥ 2`, AI confidence multiplied by `0.80` (floored at `0.50`). `OrchestratorService.buildDecision()` gained `divergenceStreak` parameter computed from the already-fetched strategy memory list — zero extra I/O. `divergenceFlag` in `FinalDecision` still reflects pre-override AI vs consensus disagreement. `aiReasoning` appended with `[OVERRIDE: ...]` marker when guard fires. Thresholds: `OVERRIDE_CONSENSUS_THRESHOLD = 0.65`, `STREAK_DAMPEN_THRESHOLD = 2`, `CONFIDENCE_DAMPEN_FACTOR = 0.80`, `CONFIDENCE_FLOOR = 0.50`.
 
 ---
 
@@ -804,30 +778,29 @@ Your last 3 recommendations for AAPL:
 
 | Path | Risk | Status | Cross-Module | Breaking |
 |---|---|---|---|---|
-| 1. Weighted Consensus | LOW | OPEN | common-lib + orchestrator config | No |
+| 1. Weighted Consensus | LOW | ✅ DONE (Phase 27) | common-lib + orchestrator | No |
 | 3. Pre-Aggregated Metrics | LOW | ✅ DONE | history-service only | No |
 | 4. Parallel Agents | MEDIUM | ✅ DONE | analysis-engine only | No |
 | 7. Kafka Streaming | MEDIUM | OPEN | orchestrator + history + notification | No (interface seam) |
 | 8. Regime Memory | LOW | OPEN | scheduler-service only | No |
-| 9. Strategy Memory | MEDIUM | OPEN | history-service + orchestrator | No |
+| 9. Strategy Memory | MEDIUM | ✅ DONE (Phase 28+30) | history-service + orchestrator | No |
 | 10. Multi-Model Cross-Validation | MEDIUM | OPEN | orchestrator only | No |
 | 11. DecisionContext Persistence | LOW | OPEN | orchestrator + history | No |
-| 12. Divergence Safety Override | MEDIUM | OPEN | orchestrator only | No |
+| 12. Divergence Safety Override | MEDIUM | ✅ DONE (Phase 29+30) | common-lib + orchestrator | No |
 | 13. Database Indexing | LOW | ✅ PARTIAL | history-service schema only | No |
 | 14. Real-Time UI (SSE) | LOW | ✅ DONE | history-service + UI | No |
 
 ### Recommended Execution Order (Remaining Paths)
 
-Based on current architecture state, risk profile, and value delivery:
+Paths 1, 9, and 12 are complete. The system now has adaptive consensus, AI memory, and divergence safety logic active.
 
-1. **Path 1: Weighted Consensus** — makes divergence detection more meaningful, low-risk bean swap
-2. **Path 9: Strategy Memory** — qualitative intelligence upgrade for the AI strategist
-3. **Path 8: Regime Memory** — smooths scheduling transitions, operational stability
-4. **Path 12: Divergence Safety Override** — requires divergence history to tune thresholds
-5. **Path 11: DecisionContext Persistence** — architectural cleanup, non-urgent
-6. **Path 13 (remaining): trace_id index + partitioning** — prerequisite for long-term operation
-7. **Path 7: Kafka Streaming** — infrastructure upgrade, deferred until scale demands it
-8. **Path 10: Multi-Model Cross-Validation** — research path, cost and latency implications
+**Next evolution must be data-driven, not speculative.** Run the system, collect divergence frequency, measure override frequency, measure average dampening impact — then decide. The remaining paths in priority order once data is available:
+
+1. **Path 8: Regime Memory** — smooths scheduling transitions (LOW risk, scheduler-only)
+2. **Path 11: DecisionContext Persistence** — architectural cleanup, non-urgent (LOW risk)
+3. **Path 13 (remaining): trace_id index + partitioning** — prerequisite for long-term operation
+4. **Path 7: Kafka Streaming** — infrastructure upgrade, deferred until scale demands it
+5. **Path 10: Multi-Model Cross-Validation** — research path, cost and latency implications
 
 ---
 
@@ -1236,3 +1209,141 @@ Verdict logic:
 curl "http://localhost:8085/api/v1/history/analytics/edge-report?symbol=IBM"
 # Returns full edge report with verdict
 ```
+
+---
+
+## Phase 27 — Performance-Weighted Consensus (Path 1) ✅ COMPLETED 2026-02-27
+
+**Goal:** Consensus guardrail uses accumulated agent performance intelligence rather than equal weights. Divergence detection now compares AI against a historically-informed signal — a stronger safety assertion.
+
+### 27A — common-lib consensus package
+
+| Artifact | Change |
+|---|---|
+| `ConsensusEngine` | Added `default compute(List<AnalysisResult>, Map<String,Double>)` — backward-compatible; delegates to `compute(results)` |
+| `PerformanceWeightedConsensusStrategy` | **New class** — implements both `compute` overloads. Uses caller-supplied adaptive weights; falls back to `1.0` per agent when no weights provided |
+| `DefaultWeightedConsensusStrategy` | Unchanged — retained for reference |
+
+### 27B — agent-orchestrator
+
+| Artifact | Change |
+|---|---|
+| `ConsensusIntegrationGuard` | Added `resolve(results, engine, Map<String,Double> weights)` overload — calls `engine.compute(results, weights)` |
+| `OrchestratorConfig` | Bean swap: `DefaultWeightedConsensusStrategy` → `PerformanceWeightedConsensusStrategy` |
+| `OrchestratorService.buildDecision()` | Guard call updated: `resolve(results, consensusEngine, adaptiveWeights)` |
+
+**Responsibility shift:** The consensus guardrail graduated from a fixed equal-weight vote to a performance-weighted signal. A divergence between AI and consensus now carries more information — the consensus reflects which agents have historically been accurate.
+
+---
+
+## Phase 28 — Strategy Memory for AI (Path 9) ✅ COMPLETED 2026-02-27
+
+**Goal:** AI strategist receives its own last 3 decisions as context. Detects signal flip-flop and regime transitions across cycles without modifying `DecisionContext` or `FinalDecision`.
+
+### 28A — history-service
+
+| Artifact | Change |
+|---|---|
+| `DecisionHistoryRepository` | Added `findRecentBySymbol(symbol, limit)` — `SELECT … ORDER BY saved_at DESC LIMIT :limit` |
+| `HistoryService` | Added `getRecentDecisions(symbol, limit)` — returns `Flux<DecisionHistory>`, capped at 10 |
+| `HistoryController` | Added `GET /api/v1/history/recent/{symbol}?limit=3` |
+
+### 28B — agent-orchestrator
+
+| Artifact | Change |
+|---|---|
+| `OrchestratorService` | Added `fetchStrategyMemory(symbol)` — WebClient GET, `onErrorResume → List.of()` |
+| `OrchestratorService` | Restructured AI call site: `fetchStrategyMemory().flatMap(memory → evaluate(ctx, mktCtx, memory))` |
+| `AIStrategistService` | Added `evaluate(DecisionContext, Context, List<Map>)` overload |
+| `AIStrategistService` | Added `buildMemorySection()` + `toDouble()` helpers |
+| `AIStrategistService` | `buildPrompt` 6-arg overload — memory section inserted after session section |
+
+**Prompt memory section format (injected when non-empty):**
+```
+Strategy Memory (last 3 decisions, most recent first — avoid flip-flop, do not blindly continue prior trend):
+  - signal=BUY    confidence=0.82  regime=TRENDING      diverged=false
+  - signal=HOLD   confidence=0.65  regime=TRENDING      diverged=true
+  - signal=HOLD   confidence=0.55  regime=CALM          diverged=false
+```
+
+**Responsibility shift:** AI strategist gains cross-cycle temporal awareness. Pipeline latency impact is bounded by one non-blocking history-service read; failure is silently absorbed.
+
+---
+
+## Phase 29 — Divergence Safety Override (Path 12) ✅ COMPLETED 2026-02-27
+
+**Goal:** Act on divergence, not just observe it. When consensus and AI persistently disagree, apply a deterministic guardrail — signal override or confidence dampening.
+
+### 29A — common-lib guard package
+
+New package: `com.agentplatform.common.guard`
+
+| Class | Role |
+|---|---|
+| `DivergenceGuard` | Pure static evaluator — two rules, `OverrideResult` record |
+
+**Rule 1 — ConsensusOverride:**
+- Fires when: `divergenceFlag = true` AND `consensusConfidence ≥ 0.65`
+- Effect: AI signal and confidence replaced with consensus values
+- Rationale: strongly-confident consensus disagreeing with AI is a high-value safety signal
+
+**Rule 2 — ConfidenceDampen:**
+- Fires when: `divergenceFlag = true` AND `recentDivergenceStreak ≥ 2`
+- Effect: AI signal kept; confidence multiplied by `0.80`
+- Rationale: persistent disagreement suggests AI is pattern-locked; reduce certainty without silencing it
+
+| Constant | Value |
+|---|---|
+| `OVERRIDE_CONSENSUS_THRESHOLD` | `0.65` |
+| `STREAK_DAMPEN_THRESHOLD` | `2` |
+| `CONFIDENCE_DAMPEN_FACTOR` | `0.80` |
+
+### 29B — agent-orchestrator
+
+| Artifact | Change |
+|---|---|
+| `OrchestratorService` | Added `computeDivergenceStreak(priorDecisions)` — counts consecutive `divergenceFlag=true` from front of memory list (zero extra I/O) |
+| `OrchestratorService.buildDecision()` | Added `divergenceStreak` parameter; `DivergenceGuard.evaluate()` applied post-consensus |
+| `OrchestratorService` | Import: `DivergenceGuard` |
+
+**FinalDecision field behaviour under override:**
+
+| Field | Before | After (when guard fires) |
+|---|---|---|
+| `finalSignal` | AI signal | Consensus signal (Rule 1) or unchanged (Rule 2) |
+| `confidenceScore` | AI confidence | Consensus confidence (Rule 1) or dampened (Rule 2) |
+| `aiReasoning` | AI text | AI text + `[OVERRIDE: ConsensusOverride ...]` or `[OVERRIDE: ConfidenceDampen ...]` |
+| `divergenceFlag` | Raw AI≠consensus | **Unchanged** — still reflects pre-override disagreement |
+
+**Responsibility shift:** The orchestrator gained an active self-correction layer. The system no longer just observes disagreement — it acts on it, proportionally.
+
+---
+
+## Phase 30 — DivergenceGuard Refinements + Strategy Memory DTO ✅ COMPLETED 2026-02-27
+
+**Goal:** Two targeted quality improvements identified during architect review. No new logic, no schema changes, no pipeline restructuring.
+
+### 30A — Confidence Floor (DivergenceGuard)
+
+`CONFIDENCE_FLOOR = 0.50` constant added. Rule 2 dampening now applies `Math.max(CONFIDENCE_FLOOR, aiConfidence × CONFIDENCE_DAMPEN_FACTOR)`.
+
+**Effect:** Prevents sub-neutral confidence values when AI was already near 0.50. Edge case: AI at 0.55 → `0.55 × 0.80 = 0.44` was previously possible; now floors to `0.50`.
+
+### 30B — RecentDecisionMemoryDTO projection
+
+The `GET /recent/{symbol}` endpoint previously returned `Flux<DecisionHistory>` — the full entity with 25+ fields including `agents` JSON array, `aiReasoning`, weight snapshots.
+
+| Artifact | Change |
+|---|---|
+| **New** `RecentDecisionMemoryDTO` | 4-field record: `finalSignal`, `confidenceScore`, `divergenceFlag`, `marketRegime` |
+| `HistoryService.getRecentDecisions()` | Maps `DecisionHistory` → `RecentDecisionMemoryDTO` in service layer |
+| `HistoryController.recentDecisions()` | Return type: `Flux<DecisionHistory>` → `Flux<RecentDecisionMemoryDTO>` |
+| `AIStrategistService` | No change — JSON field names identical; `Map<String,Object>` parsing unaffected |
+
+**Payload reduction:** ~10KB (full entity × 3) → ~200 bytes (4 fields × 3).
+
+**Architect note on override cooldown (proposed, deferred):** The proposed cooldown to suppress Rule 1 on the cycle after a ConsensusOverride was assessed and deferred — it could suppress correct consecutive overrides in sustained disagreement scenarios, and detection via `aiReasoning` substring parsing is fragile. Defer until real data shows cascading overrides are a problem.
+
+---
+
+*Review last updated: 2026-02-27. Phases 27–30 verified against codebase. 10 modules total. DivergenceGuard active. Strategy memory active. Performance-weighted consensus active. Next evolution is data-driven — run the system before adding more layers.*

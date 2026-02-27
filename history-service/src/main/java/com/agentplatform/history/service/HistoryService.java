@@ -10,6 +10,7 @@ import com.agentplatform.common.momentum.MomentumStateCalculator;
 import com.agentplatform.history.dto.DecisionMetricsDTO;
 import com.agentplatform.history.dto.EdgeReportDTO;
 import com.agentplatform.history.dto.MarketStateDTO;
+import com.agentplatform.history.dto.RecentDecisionMemoryDTO;
 import com.agentplatform.history.dto.SnapshotDecisionDTO;
 import com.agentplatform.history.model.AgentPerformanceSnapshot;
 import com.agentplatform.history.model.DecisionHistory;
@@ -645,6 +646,22 @@ public class HistoryService {
      * @param symbol   ticker symbol
      * @param sinceMins look-back window in minutes (e.g. 10 = last 10 min)
      */
+    /**
+     * Phase-27 Strategy Memory: returns the last {@code limit} decisions for a symbol
+     * as lightweight {@link RecentDecisionMemoryDTO} projections (4 fields only).
+     * Ordered most-recent first. Used by the AI strategist to detect signal flip-flop
+     * and regime transitions across cycles.
+     */
+    public Flux<RecentDecisionMemoryDTO> getRecentDecisions(String symbol, int limit) {
+        return repository.findRecentBySymbol(symbol, Math.min(limit, 10))
+            .map(d -> new RecentDecisionMemoryDTO(
+                d.getFinalSignal(),
+                d.getConfidenceScore(),
+                d.getDivergenceFlag(),
+                d.getMarketRegime()
+            ));
+    }
+
     public Flux<SnapshotDecisionDTO> getUnresolvedSignals(String symbol, int sinceMins) {
         LocalDateTime since = LocalDateTime.now(java.time.ZoneOffset.UTC).minusMinutes(sinceMins);
         return repository.findUnresolvedSignals(symbol, since, 10)

@@ -54,4 +54,12 @@ public interface DecisionHistoryRepository extends ReactiveCrudRepository<Decisi
         """)
     Flux<DecisionHistory> findUnresolvedSignals(String symbol, java.time.LocalDateTime since, int limit);
 
+    @Query("""
+        SELECT * FROM decision_history
+        WHERE symbol = :symbol
+        ORDER BY saved_at DESC
+        LIMIT :limit
+        """)
+    Flux<DecisionHistory> findRecentBySymbol(String symbol, int limit);
+
 }

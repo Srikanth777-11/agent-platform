@@ -7,6 +7,7 @@ import com.agentplatform.history.dto.DecisionMetricsDTO;
 import com.agentplatform.history.dto.EdgeReportDTO;
 import com.agentplatform.history.dto.MarketStateDTO;
 import com.agentplatform.history.dto.SnapshotDecisionDTO;
+import com.agentplatform.history.dto.RecentDecisionMemoryDTO;
 import com.agentplatform.history.model.AgentPerformanceSnapshot;
 import com.agentplatform.history.service.HistoryService;
 import org.slf4j.Logger;
@@ -118,6 +119,15 @@ public class HistoryController {
         return historyService.getEdgeReport(symbol)
             .map(ResponseEntity::ok)
             .defaultIfEmpty(ResponseEntity.notFound().build());
+    }
+
+    // ── Phase-27: Strategy Memory ───────────────────────────────────────────
+
+    @GetMapping("/recent/{symbol}")
+    public Flux<RecentDecisionMemoryDTO> recentDecisions(
+            @PathVariable String symbol,
+            @RequestParam(defaultValue = "3") int limit) {
+        return historyService.getRecentDecisions(symbol, limit);
     }
 
     // ── Phase-24: P&L Outcome Learning Loop ────────────────────────────────

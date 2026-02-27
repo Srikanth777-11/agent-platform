@@ -46,4 +46,21 @@ public final class ConsensusIntegrationGuard {
         }
         return engine.compute(results);
     }
+
+    /**
+     * Delegates to {@code engine.compute(results, weights)} after null/empty guard.
+     * Passes caller-supplied adaptive weights to implementations that support them.
+     *
+     * @param results the agent analysis outputs (may be null or empty)
+     * @param engine  the consensus engine to delegate to when results are valid
+     * @param weights adaptive weight per agentName from {@code AgentScoreCalculator}
+     * @return a valid {@link ConsensusResult} — never {@code null}
+     */
+    public static ConsensusResult resolve(List<AnalysisResult> results, ConsensusEngine engine,
+                                          Map<String, Double> weights) {
+        if (results == null || results.isEmpty()) {
+            return FALLBACK;
+        }
+        return engine.compute(results, weights);
+    }
 }

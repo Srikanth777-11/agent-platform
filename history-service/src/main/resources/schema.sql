@@ -23,7 +23,17 @@ CREATE TABLE IF NOT EXISTS decision_history (
     -- v6 AI strategist reasoning (additive — nullable for backward compatibility)
     ai_reasoning           TEXT,
     -- v7 divergence awareness (additive — nullable for backward compatibility)
-    divergence_flag        BOOLEAN
+    divergence_flag        BOOLEAN,
+    -- v8 scalping intelligence (additive — nullable for backward compatibility)
+    trading_session        VARCHAR(30),
+    entry_price            DOUBLE PRECISION,
+    target_price           DOUBLE PRECISION,
+    stop_loss              DOUBLE PRECISION,
+    estimated_hold_minutes INT,
+    -- v8 P&L outcome fields (populated ~5-10 min after decision by outcome tracker)
+    outcome_percent        DOUBLE PRECISION,
+    outcome_hold_minutes   INT,
+    outcome_resolved       BOOLEAN
 );
 
 -- v8 projection tables & index optimization

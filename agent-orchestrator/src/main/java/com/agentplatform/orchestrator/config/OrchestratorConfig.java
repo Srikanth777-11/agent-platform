@@ -1,7 +1,7 @@
 package com.agentplatform.orchestrator.config;
 
 import com.agentplatform.common.consensus.ConsensusEngine;
-import com.agentplatform.common.consensus.DefaultWeightedConsensusStrategy;
+import com.agentplatform.common.consensus.PerformanceWeightedConsensusStrategy;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.springframework.beans.factory.annotation.Value;
@@ -44,14 +44,9 @@ public class OrchestratorConfig {
         return builder.baseUrl(historyUrl).build();
     }
 
-    /**
-     * Consensus strategy bean.
-     * TODO: swap to PerformanceWeightedConsensusStrategy when historical
-     *       agent scoring is available — no other code change required.
-     */
     @Bean
     public ConsensusEngine consensusEngine() {
-        return new DefaultWeightedConsensusStrategy();
+        return new PerformanceWeightedConsensusStrategy();
     }
 
     @Bean

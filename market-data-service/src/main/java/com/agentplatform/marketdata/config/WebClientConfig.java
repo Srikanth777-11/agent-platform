@@ -20,13 +20,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 public class WebClientConfig {
 
     // ── Active provider (switch comment to toggle) ────────────────────────────
-    // TWELVE DATA (active for today's testing):
-    @Value("${twelve-data.base-url:https://api.twelvedata.com}")
-    private String baseUrl;
-
-    // ALPHA VANTAGE (uncomment tomorrow to switch back):
-    // @Value("${alpha-vantage.base-url:https://www.alphavantage.co}")
+    // TWELVE DATA (inactive):
+    // @Value("${twelve-data.base-url:https://api.twelvedata.com}")
     // private String baseUrl;
+
+    // ALPHA VANTAGE (active):
+    @Value("${alpha-vantage.base-url:https://www.alphavantage.co}")
+    private String baseUrl;
 
     @Bean
     public WebClient marketDataWebClient(WebClient.Builder builder) {

@@ -32,10 +32,7 @@ services:
       - "8080:8080"
     environment:
       SPRING_PROFILES_ACTIVE:  ${SPRING_PROFILES_ACTIVE:-}
-      # ── Active today: Twelve Data (800 calls/day free) ──
-      TWELVE_DATA_API_KEY:     ${TWELVE_DATA_API_KEY:-}
-      # ── Tomorrow: uncomment Alpha Vantage, comment Twelve Data ──
-      # ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-}
+      ALPHA_VANTAGE_API_KEY:   ${ALPHA_VANTAGE_API_KEY:-}
     networks:
       - agent-net
     healthcheck:
@@ -106,6 +103,7 @@ services:
       ANALYSIS_ENGINE_URL: http://analysis-engine:8083
       NOTIFICATION_URL:    http://notification-service:8084
       HISTORY_URL:         http://history-service:8085
+      ANTHROPIC_API_KEY:   ${ANTHROPIC_API_KEY:-}
     depends_on:
       market-data-service:
         condition: service_healthy
@@ -172,7 +170,37 @@ services:
       retries: 3
       start_period: 30s
 
-  # ── 6. Scheduler Service ──────────────────────────
+  # ── 6. Trade Service ──────────────────────────────
+  trade-service:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        SERVICE: trade-service
+    image: agent-platform/trade-service:local
+    container_name: trade-service
+    ports:
+      - "8086:8086"
+    environment:
+      POSTGRES_R2DBC_URL:  r2dbc:postgresql://postgres:5432/agent_platform
+      POSTGRES_USER:       agent
+      POSTGRES_PASSWORD:   agent_secret
+      HISTORY_SERVICE_URL: http://history-service:8085
+    depends_on:
+      postgres:
+        condition: service_healthy
+      history-service:
+        condition: service_healthy
+    networks:
+      - agent-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8086/api/v1/trade/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── 7. Scheduler Service ──────────────────────────
   scheduler-service:
     build:
       context: .

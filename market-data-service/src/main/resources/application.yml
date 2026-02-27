@@ -8,13 +8,13 @@ server:
 # ── Active data provider (switch comment to toggle) ───────────────────────────
 # TO SWITCH BACK TO ALPHA VANTAGE: comment twelve-data block, uncomment alpha-vantage block
 
-twelve-data:
-  base-url: https://api.twelvedata.com
-  api-key: ${TWELVE_DATA_API_KEY:demo}
+# twelve-data:
+#   base-url: https://api.twelvedata.com
+#   api-key: ${TWELVE_DATA_API_KEY:demo}
 
-# alpha-vantage:
-#   base-url: https://www.alphavantage.co
-#   api-key: ${ALPHA_VANTAGE_API_KEY:demo}
+alpha-vantage:
+  base-url: https://www.alphavantage.co
+  api-key: ${ALPHA_VANTAGE_API_KEY:demo}
 
 management:
   endpoints:

@@ -96,6 +96,41 @@ public class AIStrategistService {
     }
 
     /**
+     * Phase-27 Strategy Memory entry point.
+     *
+     * <p>Identical to {@link #evaluate(DecisionContext, Context)} but injects
+     * the last N prior decisions into the prompt so the AI can detect
+     * signal flip-flop and regime transitions across cycles.
+     *
+     * @param priorDecisions raw decision maps from {@code GET /recent/{symbol}};
+     *                       empty list is safe — memory section is silently omitted
+     */
+    public Mono<AIStrategyDecision> evaluate(DecisionContext decisionCtx, Context marketCtx,
+                                             List<Map<String, Object>> priorDecisions) {
+        if (anthropicApiKey == null || anthropicApiKey.isBlank()) {
+            log.warn("[AIStrategist] No Anthropic API key configured — returning rule-based fallback. symbol={}",
+                     marketCtx.symbol());
+            return Mono.just(fallback(decisionCtx.agentResults()));
+        }
+
+        String selectedModel = ModelSelector.selectModel(decisionCtx.regime());
+
+        return Mono.fromCallable(() -> buildPrompt(marketCtx, decisionCtx.agentResults(),
+                                                   decisionCtx.regime(), decisionCtx.adaptiveWeights(),
+                                                   decisionCtx, priorDecisions))
+            .flatMap(prompt -> callAnthropicApi(prompt, selectedModel))
+            .map(this::parseResponse)
+            .doOnSuccess(d -> log.info("[AIStrategist] Strategy evaluated (with memory). signal={} confidence={} symbol={} memorySize={}",
+                                       d.finalSignal(), d.confidence(), marketCtx.symbol(),
+                                       priorDecisions != null ? priorDecisions.size() : 0))
+            .onErrorResume(e -> {
+                log.error("[AIStrategist] API call failed — returning rule-based fallback. symbol={} reason={}",
+                          marketCtx.symbol(), e.getMessage());
+                return Mono.just(fallback(decisionCtx.agentResults()));
+            });
+    }
+
+    /**
      * Omega-aware entry point — primary path from Phase-18 onward.
      *
      * <p>Accepts the omega-enriched {@link DecisionContext} (stabilityPressure,
@@ -135,7 +170,7 @@ public class AIStrategistService {
 
     private String buildPrompt(Context context, List<AnalysisResult> results,
                                 MarketRegime regime, Map<String, Double> adaptiveWeights) {
-        return buildPrompt(context, results, regime, adaptiveWeights, null);
+        return buildPrompt(context, results, regime, adaptiveWeights, null, null);
     }
 
     /**
@@ -148,6 +183,12 @@ public class AIStrategistService {
     private String buildPrompt(Context context, List<AnalysisResult> results,
                                 MarketRegime regime, Map<String, Double> adaptiveWeights,
                                 DecisionContext omegaCtx) {
+        return buildPrompt(context, results, regime, adaptiveWeights, omegaCtx, null);
+    }
+
+    private String buildPrompt(Context context, List<AnalysisResult> results,
+                                MarketRegime regime, Map<String, Double> adaptiveWeights,
+                                DecisionContext omegaCtx, List<Map<String, Object>> priorDecisions) {
         List<Double> prices = context.prices();
         double latestClose = (prices != null && !prices.isEmpty()) ? prices.get(0) : 0.0;
 
@@ -238,6 +279,8 @@ public class AIStrategistService {
             };
         }
 
+        String memorySection = buildMemorySection(priorDecisions);
+
         return """
             You are a quantitative trading strategist synthesising multiple agent signals \
             into a single final recommendation.
@@ -247,7 +290,7 @@ public class AIStrategistService {
             Latest Close:  %.4f
 
             Agent Signals (with history-adjusted adaptive weights):
-            %s%s%s%s%s
+            %s%s%s%s%s%s
             Based on the market regime, the weighted agent signals, and risk discipline, \
             provide your strategic recommendation.
 
@@ -260,11 +303,30 @@ public class AIStrategistService {
               "reasoning": "your rationale here"%s
             }
             """.formatted(context.symbol(), regime.name(), latestClose, agentSummary,
-                          omegaSection, reflectionSection, moodSection, sessionSection,
+                          omegaSection, reflectionSection, moodSection, sessionSection, memorySection,
                           reasoningInstruction,
                           activeScalpingWindow
                               ? ",\n              \"entryPrice\": <recommended entry price for BUY/SELL, null for HOLD/WATCH>,\n              \"targetPrice\": <take-profit price — typically 0.3–0.5% move, null for HOLD/WATCH>,\n              \"stopLoss\": <hard stop price — typically 0.15–0.25% against entry, null for HOLD/WATCH>,\n              \"estimatedHoldMinutes\": <expected scalp duration 1–15 min, null for HOLD/WATCH>"
                               : "");
+    }
+
+    private String buildMemorySection(List<Map<String, Object>> priorDecisions) {
+        if (priorDecisions == null || priorDecisions.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder(
+            "\nStrategy Memory (last " + priorDecisions.size() + " decisions, most recent first — avoid flip-flop, do not blindly continue prior trend):\n");
+        for (Map<String, Object> d : priorDecisions) {
+            sb.append(String.format("  - signal=%-5s  confidence=%.2f  regime=%-12s  diverged=%s%n",
+                d.getOrDefault("finalSignal", "?"),
+                toDouble(d.getOrDefault("confidenceScore", 0.5)),
+                d.getOrDefault("marketRegime", "?"),
+                d.getOrDefault("divergenceFlag", "?")));
+        }
+        return sb.toString();
+    }
+
+    private double toDouble(Object val) {
+        if (val instanceof Number n) return n.doubleValue();
+        try { return Double.parseDouble(String.valueOf(val)); } catch (Exception e) { return 0.5; }
     }
 
     // ── Anthropic API call (fully reactive — no .block()) ────────────────────

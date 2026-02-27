@@ -13,6 +13,7 @@ import com.agentplatform.common.cognition.reflection.ArchitectReflectionInterpre
 import com.agentplatform.common.consensus.AgentScoreCalculator;
 import com.agentplatform.common.consensus.ConsensusEngine;
 import com.agentplatform.common.consensus.ConsensusResult;
+import com.agentplatform.common.guard.DivergenceGuard;
 import com.agentplatform.common.decision.DecisionEventPublisher;
 import com.agentplatform.common.event.MarketDataEvent;
 import com.agentplatform.common.model.AIStrategyDecision;
@@ -157,16 +158,20 @@ public class OrchestratorService {
                                         reflection.reflectionPersistence(), event.traceId());
 
                                     // AI Strategist Layer — primary intelligence evaluation.
-                                    return aiStrategistService
-                                        .evaluate(reflectedCtx, capturedCtx[0])
-                                        .map(aiDecision -> {
+                                    // Phase-27: fetch last 3 decisions as strategy memory (non-blocking, best-effort).
+                                    return fetchStrategyMemory(event.symbol())
+                                        .flatMap(memory -> {
+                                            final int divergenceStreak = computeDivergenceStreak(memory);
+                                            return aiStrategistService
+                                                .evaluate(reflectedCtx, capturedCtx[0], memory)
+                                                .map(aiDecision -> {
                                             decisionFlowLogger.logWithTraceId(
                                                 DecisionFlowLogger.AI_STRATEGY_EVALUATED, event.traceId());
 
                                             long latencyMs = System.currentTimeMillis() - startTime;
                                             FinalDecision decision = buildDecision(
                                                 event, results, latencyMs, adaptiveWeights,
-                                                regime[0], aiDecision, capturedSession[0]);
+                                                regime[0], aiDecision, capturedSession[0], divergenceStreak);
 
                                             // ── Enrich DecisionContext (post-AI snapshot) ──
                                             String modelLabel = ModelSelector.resolveLabel(regime[0]);
@@ -193,7 +198,8 @@ public class OrchestratorService {
                                             decisionFlowLogger.logWithTraceId(
                                                 DecisionFlowLogger.EVENTS_DISPATCHED, decision.traceId());
                                             return decision.agents();
-                                        });
+                                        });  // closes .map(aiDecision -> {
+                                        }); // closes .flatMap(memory -> {
                                 }));
                 })
                 .doOnError(e -> log.error("Orchestration failed for symbol={}", event.symbol(), e))
@@ -246,6 +252,35 @@ public class OrchestratorService {
     }
 
     /**
+     * Counts consecutive divergence flags from the front of the memory list
+     * (most-recent first). Used by {@link DivergenceGuard} to detect persistent streaks.
+     */
+    private int computeDivergenceStreak(List<Map<String, Object>> priorDecisions) {
+        int streak = 0;
+        for (Map<String, Object> d : priorDecisions) {
+            if (Boolean.TRUE.equals(d.get("divergenceFlag"))) streak++;
+            else break;
+        }
+        return streak;
+    }
+
+    /**
+     * Phase-27: fetches the last 3 decisions for the symbol from history-service.
+     * Returns an empty list on any error so the pipeline never stalls.
+     */
+    private Mono<List<Map<String, Object>>> fetchStrategyMemory(String symbol) {
+        return historyClient.get()
+            .uri("/api/v1/history/recent/{symbol}?limit=3", symbol)
+            .retrieve()
+            .bodyToFlux(new ParameterizedTypeReference<Map<String, Object>>() {})
+            .collectList()
+            .onErrorResume(e -> {
+                log.warn("[StrategyMemory] Fetch failed (non-critical). symbol={} reason={}", symbol, e.getMessage());
+                return Mono.just(List.of());
+            });
+    }
+
+    /**
      * Assembles the v7 {@link FinalDecision}.
      *
      * <p>The AI strategist's {@code finalSignal} and {@code confidence} are used as the
@@ -262,13 +297,28 @@ public class OrchestratorService {
     private FinalDecision buildDecision(MarketDataEvent event, List<AnalysisResult> results,
                                         long latencyMs, Map<String, Double> adaptiveWeights,
                                         MarketRegime regime, AIStrategyDecision aiDecision,
-                                        TradingSession session) {
+                                        TradingSession session, int divergenceStreak) {
         // Consensus runs as safety guardrail — its normalizedConfidence is stored
         // alongside the AI signal for observability and divergence tracking.
-        ConsensusResult consensus = ConsensusIntegrationGuard.resolve(results, consensusEngine);
+        // Passes adaptiveWeights so the guardrail uses historically-informed weights (Path 1).
+        ConsensusResult consensus = ConsensusIntegrationGuard.resolve(results, consensusEngine, adaptiveWeights);
 
-        // v7 — divergence awareness: AI signal vs consensus signal
+        // v7 — divergence awareness: AI signal vs consensus signal (always computed pre-override)
         boolean divergenceFlag = !aiDecision.finalSignal().equals(consensus.finalSignal());
+
+        // Path 12 — Divergence Safety Override: may replace AI signal or dampen confidence
+        DivergenceGuard.OverrideResult override = DivergenceGuard.evaluate(
+            aiDecision.finalSignal(), aiDecision.confidence(),
+            consensus.finalSignal(), consensus.normalizedConfidence(),
+            divergenceFlag, divergenceStreak);
+
+        if (override.overrideApplied()) {
+            log.info("[DivergenceGuard] Override applied. reason={} traceId={}", override.reason(), event.traceId());
+        }
+
+        String finalReasoning = override.overrideApplied()
+            ? aiDecision.reasoning() + " [OVERRIDE: " + override.reason() + "]"
+            : aiDecision.reasoning();
 
         Map<String, Long> signalVotes = results.stream()
             .collect(Collectors.groupingBy(AnalysisResult::signal, Collectors.counting()));
@@ -281,20 +331,20 @@ public class OrchestratorService {
             event.symbol(),
             event.triggeredAt(),
             results,
-            aiDecision.finalSignal(),          // AI is the primary signal
-            aiDecision.confidence(),            // AI confidence
+            override.finalSignal(),            // AI signal — or consensus if override fired
+            override.confidence(),             // AI confidence — or dampened/replaced
             metadata,
             event.traceId(),
             DECISION_VERSION,
             orchestratorVersion,
             results.size(),
             latencyMs,
-            consensus.normalizedConfidence(),   // consensus score as safety guardrail metric
+            consensus.normalizedConfidence(),  // consensus score as safety guardrail metric
             consensus.agentWeights(),
             adaptiveWeights,
             regime,
-            aiDecision.reasoning(),            // v6 AI reasoning
-            divergenceFlag,                    // v7 divergence awareness
+            finalReasoning,                    // v6 AI reasoning — appended with override note if fired
+            divergenceFlag,                    // v7 divergence awareness (pre-override, raw AI vs consensus)
             // v8 scalping intelligence
             session != null ? session.name() : null,
             aiDecision.entryPrice(),
