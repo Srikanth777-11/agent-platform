@@ -45,7 +45,7 @@ public class ReplayRunnerService {
     private static final Logger log = LoggerFactory.getLogger(ReplayRunnerService.class);
 
     /** Milliseconds to wait after each trigger before fetching the decision. */
-    private static final long PIPELINE_SETTLE_MS = 2_000;
+    private static final long PIPELINE_SETTLE_MS = 3_000;
 
     private final HistoricalReplayProvider provider;
     private final MarketDataWebClient      marketDataWebClient;
