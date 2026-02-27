@@ -12,8 +12,7 @@ import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 
-import reactor.core.scheduler.Schedulers;
-
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
@@ -123,8 +122,7 @@ public class DisciplineCoach implements AnalysisAgent {
             .bodyValue(bodyJson)
             .retrieve()
             .bodyToMono(String.class)
-            .subscribeOn(Schedulers.boundedElastic())
-            .block();
+            .block(Duration.ofSeconds(15));
 
         // Extract text from response
         JsonNode root = objectMapper.readTree(response);
@@ -145,6 +143,7 @@ public class DisciplineCoach implements AnalysisAgent {
             String reasoning   = json.path("reasoning").asText("No reasoning provided");
             String signal      = json.path("signal").asText("HOLD");
 
+            log.info("[DisciplineCoach] Claude responded: assessment={} signal={} confidence={}", assessment, signal, confidence);
             String summary = String.format(
                 "DisciplineCoach [Claude AI]: Assessment=%s | %s", assessment, reasoning
             );

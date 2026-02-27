@@ -1,0 +1,229 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────
+# Hybrid Trading Intelligence Agent Platform
+# FEATURE BRANCH Dev Compose  (ports 9080-9086, 9432)
+# Run with: docker-compose -f docker-compose.dev.yml up --build -d
+# Stop with: docker-compose -f docker-compose.dev.yml down
+# ─────────────────────────────────────────────────────
+# Does NOT touch the production stack (ports 8080-8086)
+# Uses separate containers (dev-*), volume (pgdata-dev),
+# network (agent-net-dev) and image tags (:dev)
+# ─────────────────────────────────────────────────────
+
+volumes:
+  pgdata-dev:
+
+networks:
+  agent-net-dev:
+    driver: bridge
+
+services:
+
+  # ── 1. Market Data Service ─────────────────────────
+  market-data-service:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        SERVICE: market-data-service
+    image: agent-platform/market-data-service:dev
+    container_name: dev-market-data-service
+    ports:
+      - "9080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE:  ${SPRING_PROFILES_ACTIVE:-}
+      ALPHA_VANTAGE_API_KEY:   ${ALPHA_VANTAGE_API_KEY:-}
+      ANGELONE_API_KEY:        ${ANGELONE_API_KEY:-}
+      ANGELONE_CLIENT_ID:      ${ANGELONE_CLIENT_ID:-}
+      ANGELONE_PASSWORD:       ${ANGELONE_PASSWORD:-}
+      ANGELONE_TOTP_SECRET:    ${ANGELONE_TOTP_SECRET:-}
+    networks:
+      - agent-net-dev
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/v1/market-data/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── 2. Analysis Engine (Agents + Claude AI) ────────
+  analysis-engine:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        SERVICE: analysis-engine
+    image: agent-platform/analysis-engine:dev
+    container_name: dev-analysis-engine
+    ports:
+      - "9083:8083"
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    networks:
+      - agent-net-dev
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8083/api/v1/analyze/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── 3. Notification Service (Slack) ───────────────
+  notification-service:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        SERVICE: notification-service
+    image: agent-platform/notification-service:dev
+    container_name: dev-notification-service
+    ports:
+      - "9084:8084"
+    environment:
+      SLACK_ENABLED: ${SLACK_ENABLED:-false}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+    networks:
+      - agent-net-dev
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8084/api/v1/notify/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── 4. Agent Orchestrator ─────────────────────────
+  agent-orchestrator:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        SERVICE: agent-orchestrator
+    image: agent-platform/agent-orchestrator:dev
+    container_name: dev-agent-orchestrator
+    ports:
+      - "9081:8081"
+    environment:
+      MARKET_DATA_URL:     http://dev-market-data-service:8080
+      ANALYSIS_ENGINE_URL: http://dev-analysis-engine:8083
+      NOTIFICATION_URL:    http://dev-notification-service:8084
+      HISTORY_URL:         http://dev-history-service:8085
+      ANTHROPIC_API_KEY:   ${ANTHROPIC_API_KEY:-}
+    depends_on:
+      market-data-service:
+        condition: service_healthy
+      analysis-engine:
+        condition: service_healthy
+      notification-service:
+        condition: service_healthy
+      history-service:
+        condition: service_healthy
+    networks:
+      - agent-net-dev
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/api/v1/orchestrate/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── 5a. PostgreSQL (isolated dev volume) ──────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: dev-agent-postgres
+    ports:
+      - "9432:5432"
+    environment:
+      POSTGRES_DB:       agent_platform
+      POSTGRES_USER:     agent
+      POSTGRES_PASSWORD: agent_secret
+    volumes:
+      - pgdata-dev:/var/lib/postgresql/data
+    networks:
+      - agent-net-dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent_platform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ── 5b. History Service ────────────────────────────
+  history-service:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        SERVICE: history-service
+    image: agent-platform/history-service:dev
+    container_name: dev-history-service
+    ports:
+      - "9085:8085"
+    environment:
+      POSTGRES_R2DBC_URL: r2dbc:postgresql://dev-agent-postgres:5432/agent_platform
+      POSTGRES_USER:      agent
+      POSTGRES_PASSWORD:  agent_secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - agent-net-dev
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8085/api/v1/history/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── 6. Trade Service ──────────────────────────────
+  trade-service:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        SERVICE: trade-service
+    image: agent-platform/trade-service:dev
+    container_name: dev-trade-service
+    ports:
+      - "9086:8086"
+    environment:
+      POSTGRES_R2DBC_URL:  r2dbc:postgresql://dev-agent-postgres:5432/agent_platform
+      POSTGRES_USER:       agent
+      POSTGRES_PASSWORD:   agent_secret
+      HISTORY_SERVICE_URL: http://dev-history-service:8085
+    depends_on:
+      postgres:
+        condition: service_healthy
+      history-service:
+        condition: service_healthy
+    networks:
+      - agent-net-dev
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8086/api/v1/trade/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── 7. Scheduler Service ──────────────────────────
+  scheduler-service:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        SERVICE: scheduler-service
+    image: agent-platform/scheduler-service:dev
+    container_name: dev-scheduler-service
+    ports:
+      - "9082:8082"
+    environment:
+      ORCHESTRATOR_URL: http://dev-agent-orchestrator:8081
+      HISTORY_URL:      http://dev-history-service:8085
+      WATCHED_SYMBOLS:  ${WATCHED_SYMBOLS:-NIFTYBEES.BSE}
+    depends_on:
+      agent-orchestrator:
+        condition: service_healthy
+      history-service:
+        condition: service_healthy
+    networks:
+      - agent-net-dev
