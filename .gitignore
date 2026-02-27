@@ -1,0 +1,37 @@
+# Environment variables with secrets
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+target/
+build/
+dist/
+*.jar
+
+# Node modules
+node_modules/
+package-lock.json
+yarn.lock
+
+# Docker
+docker-compose.override.yml
+
+# Logs
+logs/
+*.log
+
+# Temp files
+*.tmp
+.cache/

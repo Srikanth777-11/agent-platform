@@ -1,0 +1,38 @@
+spring:
+  application:
+    name: trade-service
+
+  r2dbc:
+    url: ${POSTGRES_R2DBC_URL:r2dbc:postgresql://localhost:5432/agent_platform}
+    username: ${POSTGRES_USER:agent}
+    password: ${POSTGRES_PASSWORD:agent_secret}
+
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+
+server:
+  port: 8086
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+history-service:
+  base-url: ${HISTORY_SERVICE_URL:http://localhost:8085}
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%X{traceId}] %-5level %logger{36} - %msg%n"
+  level:
+    com.agentplatform: DEBUG

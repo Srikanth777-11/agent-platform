@@ -1,0 +1,17 @@
+# Activate: --spring.profiles.active=replay
+# Replaces live Alpha Vantage calls with history-service decision replay.
+
+replay:
+  history-service-url: http://localhost:8085   # history-service base URL
+  candle-limit: 50                             # decisions loaded per symbol (oldest→newest)
+  reference-price: 100.0                       # synthetic price anchor for UI display
+
+# Replay mode disables both providers — no live API calls
+twelve-data:
+  api-key: replay-mode-disabled
+# alpha-vantage:
+#   api-key: replay-mode-disabled
+
+logging:
+  level:
+    com.agentplatform.marketdata.replay: DEBUG

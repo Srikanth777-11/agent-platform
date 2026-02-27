@@ -1,0 +1,27 @@
+spring:
+  application:
+    name: scheduler-service
+
+server:
+  port: 8082
+
+services:
+  orchestrator:
+    base-url: ${ORCHESTRATOR_URL:http://localhost:8081}
+  history:
+    base-url: ${HISTORY_URL:http://localhost:8085}
+
+scheduler:
+  symbols: ${WATCHED_SYMBOLS:IBM,AAPL}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%X{traceId}] %-5level %logger{36} - %msg%n"
+  level:
+    com.agentplatform: DEBUG

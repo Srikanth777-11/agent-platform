@@ -1,0 +1,32 @@
+spring:
+  application:
+    name: market-data-service
+
+server:
+  port: 8080
+
+# ── Active data provider (switch comment to toggle) ───────────────────────────
+# TO SWITCH BACK TO ALPHA VANTAGE: comment twelve-data block, uncomment alpha-vantage block
+
+twelve-data:
+  base-url: https://api.twelvedata.com
+  api-key: ${TWELVE_DATA_API_KEY:demo}
+
+# alpha-vantage:
+#   base-url: https://www.alphavantage.co
+#   api-key: ${ALPHA_VANTAGE_API_KEY:demo}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%X{traceId}] %-5level %logger{36} - %msg%n"
+  level:
+    com.agentplatform: DEBUG

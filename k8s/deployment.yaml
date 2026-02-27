@@ -1,0 +1,170 @@
+---
+# ── market-data-service ──────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: market-data-service
+  namespace: agent-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: market-data-service
+  template:
+    metadata:
+      labels:
+        app: market-data-service
+    spec:
+      containers:
+        - name: market-data-service
+          image: agent-platform/market-data-service:1.0.0
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: agent-platform-secrets
+          resources:
+            requests: { memory: "256Mi", cpu: "250m" }
+            limits:   { memory: "512Mi", cpu: "500m" }
+          livenessProbe:
+            httpGet: { path: /api/v1/market-data/health, port: 8080 }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /api/v1/market-data/health, port: 8080 }
+            initialDelaySeconds: 15
+            periodSeconds: 5
+---
+# ── analysis-engine ──────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analysis-engine
+  namespace: agent-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: analysis-engine
+  template:
+    metadata:
+      labels:
+        app: analysis-engine
+    spec:
+      containers:
+        - name: analysis-engine
+          image: agent-platform/analysis-engine:1.0.0
+          ports:
+            - containerPort: 8083
+          envFrom:
+            - secretRef:
+                name: agent-platform-secrets
+          resources:
+            requests: { memory: "256Mi", cpu: "250m" }
+            limits:   { memory: "512Mi", cpu: "500m" }
+          livenessProbe:
+            httpGet: { path: /api/v1/analyze/health, port: 8083 }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /api/v1/analyze/health, port: 8083 }
+            initialDelaySeconds: 15
+            periodSeconds: 5
+---
+# ── notification-service ─────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: agent-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notification-service
+  template:
+    metadata:
+      labels:
+        app: notification-service
+    spec:
+      containers:
+        - name: notification-service
+          image: agent-platform/notification-service:1.0.0
+          ports:
+            - containerPort: 8084
+          envFrom:
+            - configMapRef:
+                name: agent-platform-config
+            - secretRef:
+                name: agent-platform-secrets
+          resources:
+            requests: { memory: "128Mi", cpu: "100m" }
+            limits:   { memory: "256Mi", cpu: "250m" }
+          livenessProbe:
+            httpGet: { path: /api/v1/notify/health, port: 8084 }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+---
+# ── agent-orchestrator ───────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-orchestrator
+  namespace: agent-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: agent-orchestrator
+  template:
+    metadata:
+      labels:
+        app: agent-orchestrator
+    spec:
+      containers:
+        - name: agent-orchestrator
+          image: agent-platform/agent-orchestrator:1.0.0
+          ports:
+            - containerPort: 8081
+          envFrom:
+            - configMapRef:
+                name: agent-platform-config
+          resources:
+            requests: { memory: "256Mi", cpu: "250m" }
+            limits:   { memory: "512Mi", cpu: "500m" }
+          livenessProbe:
+            httpGet: { path: /api/v1/orchestrate/health, port: 8081 }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /api/v1/orchestrate/health, port: 8081 }
+            initialDelaySeconds: 15
+            periodSeconds: 5
+---
+# ── scheduler-service ────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scheduler-service
+  namespace: agent-platform
+spec:
+  replicas: 1   # Only 1 replica to avoid duplicate scheduling
+  selector:
+    matchLabels:
+      app: scheduler-service
+  template:
+    metadata:
+      labels:
+        app: scheduler-service
+    spec:
+      containers:
+        - name: scheduler-service
+          image: agent-platform/scheduler-service:1.0.0
+          ports:
+            - containerPort: 8082
+          envFrom:
+            - configMapRef:
+                name: agent-platform-config
+          resources:
+            requests: { memory: "128Mi", cpu: "100m" }
+            limits:   { memory: "256Mi", cpu: "250m" }

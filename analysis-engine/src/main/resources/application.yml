@@ -1,0 +1,25 @@
+spring:
+  application:
+    name: analysis-engine
+
+server:
+  port: 8083
+
+anthropic:
+  api-key: ${ANTHROPIC_API_KEY:}
+  model: claude-haiku-4-5-20251001
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%X{traceId}] %-5level %logger{36} - %msg%n"
+  level:
+    com.agentplatform: DEBUG
