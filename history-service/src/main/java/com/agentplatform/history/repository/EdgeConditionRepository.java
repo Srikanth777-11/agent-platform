@@ -5,21 +5,44 @@ import org.springframework.data.r2dbc.repository.Modifying;
 import org.springframework.data.r2dbc.repository.Query;
 import org.springframework.data.repository.reactive.ReactiveCrudRepository;
 import org.springframework.stereotype.Repository;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 @Repository
 public interface EdgeConditionRepository extends ReactiveCrudRepository<EdgeCondition, Long> {
 
     /**
+     * Phase-45: Finds a single condition row by its 4-part composite key.
+     * Returns the full entity (including winCount + lossCount) so the
+     * BayesianEdgeEstimator can compute the posterior from raw counts.
+     * Returns empty Mono if no data has been recorded for this condition yet.
+     */
+    @Query("""
+        SELECT * FROM edge_conditions
+        WHERE trading_session = :tradingSession
+          AND market_regime   = :marketRegime
+          AND directional_bias = :directionalBias
+          AND signal           = :signal
+        """)
+    Mono<EdgeCondition> findByCondition(String tradingSession, String marketRegime,
+                                        String directionalBias, String signal);
+
+    /**
+     * Returns all conditions sorted by win_rate desc — used for analytics / UI.
+     */
+    @Query("SELECT * FROM edge_conditions ORDER BY win_rate DESC")
+    Flux<EdgeCondition> findAllOrderedByWinRate();
+
+    /**
      * Atomic UPSERT: inserts a new condition row or increments win/loss counts
      * and recomputes win_rate inline.
      *
-     * @param tradingSession  e.g. OPENING_BURST, POWER_HOUR
+     * @param tradingSession  e.g. OPENING_PHASE_2, POWER_HOUR
      * @param marketRegime    e.g. VOLATILE, TRENDING
      * @param directionalBias e.g. BULLISH, STRONG_BEARISH
      * @param signal          BUY or SELL
-     * @param win             1 if outcome_percent > 0, else 0
-     * @param loss            1 if outcome_percent <= 0, else 0
+     * @param win             1 if profitable outcome, else 0
+     * @param loss            1 if losing outcome, else 0
      */
     @Modifying
     @Query("""

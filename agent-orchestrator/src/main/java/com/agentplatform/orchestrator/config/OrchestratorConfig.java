@@ -24,6 +24,9 @@ public class OrchestratorConfig {
     @Value("${services.history.base-url}")
     private String historyUrl;
 
+    @Value("${services.trade.base-url}")
+    private String tradeUrl;
+
     @Bean
     public WebClient marketDataClient(WebClient.Builder builder) {
         return builder.baseUrl(marketDataUrl).build();
@@ -42,6 +45,11 @@ public class OrchestratorConfig {
     @Bean
     public WebClient historyClient(WebClient.Builder builder) {
         return builder.baseUrl(historyUrl).build();
+    }
+
+    @Bean
+    public WebClient tradeClient(WebClient.Builder builder) {
+        return builder.baseUrl(tradeUrl).build();
     }
 
     @Bean

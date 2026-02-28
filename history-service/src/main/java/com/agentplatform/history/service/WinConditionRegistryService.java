@@ -1,5 +1,6 @@
 package com.agentplatform.history.service;
 
+import com.agentplatform.common.risk.BayesianEdgeEstimator;
 import com.agentplatform.history.model.DecisionHistory;
 import com.agentplatform.history.repository.EdgeConditionRepository;
 import org.slf4j.Logger;
@@ -30,6 +31,59 @@ public class WinConditionRegistryService {
 
     public WinConditionRegistryService(EdgeConditionRepository edgeConditionRepository) {
         this.edgeConditionRepository = edgeConditionRepository;
+    }
+
+    private static final int    MIN_SAMPLES           = 20;    // Phase-38b gate minimum
+    private static final double WIN_RATE_THRESHOLD    = 0.52;  // minimum acceptable win rate
+    private static final double POSTERIOR_CONFIDENCE  = 0.70;  // Bayesian confidence floor
+
+    /**
+     * Phase-45: Bayesian edge evaluation gate (for Phase-38b activation).
+     *
+     * <p>Replaces the naive static threshold {@code winRate < 0.52 → WATCH} with a
+     * statistically honest posterior probability. Accounts for sample size uncertainty:
+     * 0.63 win rate on 25 samples is treated as more reliable than 0.55 on 100.
+     *
+     * <h3>Decision logic</h3>
+     * <ul>
+     *   <li>No data or {@code totalCount < 20}  → {@code ALLOW} (insufficient data, don't block)</li>
+     *   <li>P(winRate > 0.52) ≥ 0.70            → {@code ALLOW} (confident edge exists)</li>
+     *   <li>P(winRate > 0.52) < 0.70            → {@code WATCH} (not statistically confident)</li>
+     * </ul>
+     *
+     * <p><strong>Phase-38a/45:</strong> This method exists but is NOT yet wired into the
+     * decision pipeline. It will be activated when Phase-38b goes live (Angel One data).
+     *
+     * @param tradingSession  e.g. OPENING_PHASE_2
+     * @param marketRegime    e.g. VOLATILE
+     * @param directionalBias e.g. STRONG_BULLISH
+     * @param signal          BUY or SELL
+     * @return Mono of {@code true} = ALLOW, {@code false} = WATCH
+     */
+    public Mono<Boolean> evaluateEdge(String tradingSession, String marketRegime,
+                                      String directionalBias, String signal) {
+        return edgeConditionRepository.findByCondition(tradingSession, marketRegime, directionalBias, signal)
+            .map(condition -> {
+                int total = condition.getTotalCount();
+                if (total < MIN_SAMPLES) {
+                    log.debug("[BayesianGate] Insufficient samples ({}/{}) — ALLOW. session={} regime={} bias={} signal={}",
+                        total, MIN_SAMPLES, tradingSession, marketRegime, directionalBias, signal);
+                    return true; // not enough data to block
+                }
+                double posterior = BayesianEdgeEstimator.posteriorProbability(
+                    condition.getWinCount(), condition.getLossCount(), WIN_RATE_THRESHOLD);
+                boolean allow = posterior >= POSTERIOR_CONFIDENCE;
+                log.info("[BayesianGate] session={} regime={} bias={} signal={} wins={} losses={} posterior={} → {}",
+                    tradingSession, marketRegime, directionalBias, signal,
+                    condition.getWinCount(), condition.getLossCount(),
+                    String.format("%.3f", posterior), allow ? "ALLOW" : "WATCH");
+                return allow;
+            })
+            .defaultIfEmpty(true) // no registry entry yet → ALLOW (no data to block on)
+            .onErrorResume(e -> {
+                log.warn("[BayesianGate] Registry query failed (non-fatal) → ALLOW. reason={}", e.getMessage());
+                return Mono.just(true);
+            });
     }
 
     /**
@@ -63,7 +117,14 @@ public class WinConditionRegistryService {
             return Mono.empty();
         }
 
-        boolean profitable = d.getOutcomePercent() > 0.0;
+        // Phase-41: use outcomeLabel if available, fall back to raw outcomePercent
+        boolean profitable;
+        String label = d.getOutcomeLabel();
+        if (label != null) {
+            profitable = "FAST_WIN".equals(label) || "SLOW_WIN".equals(label) || "TARGET_HIT".equals(label);
+        } else {
+            profitable = d.getOutcomePercent() > 0.0;
+        }
         int win  = profitable ? 1 : 0;
         int loss = profitable ? 0 : 1;
 

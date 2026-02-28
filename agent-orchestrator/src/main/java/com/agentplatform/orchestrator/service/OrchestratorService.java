@@ -6,6 +6,7 @@ import com.agentplatform.common.cognition.CalmTrajectoryInterpreter;
 import com.agentplatform.common.cognition.DirectionalBias;
 import com.agentplatform.common.cognition.DivergenceTrajectory;
 import com.agentplatform.common.cognition.DivergenceTrajectoryInterpreter;
+import com.agentplatform.common.cognition.MomentumState;
 import com.agentplatform.common.cognition.StabilityPressureCalculator;
 import com.agentplatform.common.cognition.TradingSession;
 import com.agentplatform.common.cognition.TradingSessionClassifier;
@@ -30,6 +31,9 @@ import com.agentplatform.orchestrator.ai.AIStrategistService;
 import com.agentplatform.orchestrator.ai.ModelSelector;
 import com.agentplatform.orchestrator.guard.ConsensusIntegrationGuard;
 import com.agentplatform.orchestrator.logger.DecisionFlowLogger;
+import com.agentplatform.orchestrator.pipeline.DailyRiskGovernor;
+import com.agentplatform.orchestrator.pipeline.DecisionPipelineEngine;
+import com.agentplatform.orchestrator.pipeline.GovernorDecision;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -46,7 +50,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.stream.Collectors;
 
 @Service
 public class OrchestratorService {
@@ -67,6 +70,10 @@ public class OrchestratorService {
     private final PerformanceWeightAdapter performanceWeightAdapter;
     private final AgentFeedbackAdapter agentFeedbackAdapter;
     private final AIStrategistService aiStrategistService;
+    // Phase-39: extracted gate + decision logic
+    private final DecisionPipelineEngine decisionPipelineEngine;
+    // Phase-43: daily intraday risk governor
+    private final DailyRiskGovernor dailyRiskGovernor;
 
     public OrchestratorService(
             WebClient marketDataClient,
@@ -78,7 +85,9 @@ public class OrchestratorService {
             ConsensusEngine consensusEngine,
             PerformanceWeightAdapter performanceWeightAdapter,
             AgentFeedbackAdapter agentFeedbackAdapter,
-            AIStrategistService aiStrategistService) {
+            AIStrategistService aiStrategistService,
+            DecisionPipelineEngine decisionPipelineEngine,
+            DailyRiskGovernor dailyRiskGovernor) {
         this.marketDataClient         = marketDataClient;
         this.analysisEngineClient     = analysisEngineClient;
         this.historyClient            = historyClient;
@@ -89,6 +98,8 @@ public class OrchestratorService {
         this.performanceWeightAdapter = performanceWeightAdapter;
         this.agentFeedbackAdapter     = agentFeedbackAdapter;
         this.aiStrategistService      = aiStrategistService;
+        this.decisionPipelineEngine   = decisionPipelineEngine;
+        this.dailyRiskGovernor        = dailyRiskGovernor;
     }
 
     public Mono<List<AnalysisResult>> orchestrate(MarketDataEvent event, boolean replayMode) {
@@ -140,6 +151,15 @@ public class OrchestratorService {
                                         .findFirst()
                                         .orElse(DirectionalBias.NEUTRAL);
 
+                                    // ── Phase-40: extract momentumState from TrendAgent metadata ──
+                                    MomentumState momentumState = results.stream()
+                                        .filter(r -> "TrendAgent".equals(r.agentName()))
+                                        .map(r -> r.metadata().get("momentumState"))
+                                        .filter(Objects::nonNull)
+                                        .map(v -> MomentumState.valueOf(String.valueOf(v)))
+                                        .findFirst()
+                                        .orElse(MomentumState.UNKNOWN);
+
                                     // ── Assemble DecisionContext (pre-AI snapshot) ──
                                     double latestClose = capturedCtx[0].prices() != null
                                         && !capturedCtx[0].prices().isEmpty()
@@ -148,7 +168,8 @@ public class OrchestratorService {
                                         event.symbol(), event.triggeredAt(), event.traceId(),
                                         regime[0], results, adaptiveWeights, latestClose)
                                         .withTradingSession(capturedSession[0])
-                                        .withDirectionalBias(directionalBias);
+                                        .withDirectionalBias(directionalBias)
+                                        .withMomentumState(momentumState);
 
                                     // ── Phase-18 Calm Omega enrichment (pre-AI, derived cognition) ──
                                     double stabilityPressure = StabilityPressureCalculator.compute(results, adaptiveWeights);
@@ -169,9 +190,17 @@ public class OrchestratorService {
                                         reflection.reflectionState(), reflection.calmMood(),
                                         reflection.reflectionPersistence(), event.traceId());
 
+                                    // Phase-43: fetch daily risk state before AI call (non-blocking, best-effort)
+                                    final GovernorDecision[] governorDecision = {GovernorDecision.ALLOW};
+                                    final int divergenceStreak = replayMode ? 0
+                                        : computeDivergenceStreak(List.of());
+
                                     // AI Strategist Layer — skipped in replay mode (consensus-only).
                                     // Phase-34: replay uses consensus signal directly to avoid AI latency.
                                     Mono<AIStrategyDecision> aiMono;
+                                    // Phase-44: capture peak-mode context for post-AI enrichment
+                                    final DecisionContext[] peakCtxRef = {reflectedCtx};
+                                    final boolean[] peakModeRef = {false};
                                     if (replayMode) {
                                         ConsensusResult quickConsensus = ConsensusIntegrationGuard.resolve(
                                             results, consensusEngine, adaptiveWeights);
@@ -185,25 +214,54 @@ public class OrchestratorService {
                                         ));
                                     } else {
                                         // Phase-27: fetch last 3 decisions as strategy memory (non-blocking, best-effort).
+                                        // Phase-44: detect peak mode from memory confidence + session + regime.
                                         aiMono = fetchStrategyMemory(event.symbol())
-                                            .flatMap(memory -> aiStrategistService.evaluate(reflectedCtx, capturedCtx[0], memory));
+                                            .flatMap(memory -> {
+                                                double prevConfidence = 0.65;
+                                                if (!memory.isEmpty()) {
+                                                    Object c = memory.get(0).getOrDefault("confidenceScore", 0.65);
+                                                    if (c instanceof Number n) prevConfidence = n.doubleValue();
+                                                }
+                                                boolean isPeak = (capturedSession[0] == TradingSession.OPENING_PHASE_1
+                                                    || capturedSession[0] == TradingSession.OPENING_PHASE_2)
+                                                    && regime[0] == MarketRegime.VOLATILE
+                                                    && divergenceStreak == 0
+                                                    && prevConfidence >= 0.65;
+                                                peakModeRef[0] = isPeak;
+                                                DecisionContext activeCtx = isPeak
+                                                    ? reflectedCtx.withPeakMode(true) : reflectedCtx;
+                                                peakCtxRef[0] = activeCtx;
+                                                if (isPeak) {
+                                                    log.info("[Phase44-PeakMode] ACTIVE. session={} regime={} prevConf={} traceId={}",
+                                                        capturedSession[0], regime[0],
+                                                        String.format("%.3f", prevConfidence), event.traceId());
+                                                }
+                                                return aiStrategistService.evaluate(activeCtx, capturedCtx[0], memory);
+                                            });
                                     }
-                                    final int divergenceStreak = replayMode ? 0
-                                        : computeDivergenceStreak(List.of());
-                                    return aiMono
-                                        .map(aiDecision -> {
+                                    // Phase-43: resolve governor decision reactively, then build decision
+                                    Mono<GovernorDecision> governorMono = replayMode
+                                        ? Mono.just(GovernorDecision.ALLOW)
+                                        : dailyRiskGovernor.evaluate(event.symbol())
+                                            .doOnNext(gd -> governorDecision[0] = gd);
+                                    return Mono.zip(aiMono, governorMono)
+                                        .map(tuple -> {
+                                            AIStrategyDecision aiDecision = tuple.getT1();
+                                            GovernorDecision govDecision  = tuple.getT2();
                                             decisionFlowLogger.logWithTraceId(
                                                 DecisionFlowLogger.AI_STRATEGY_EVALUATED, event.traceId());
 
                                             long latencyMs = System.currentTimeMillis() - startTime;
-                                            FinalDecision decision = buildDecision(
+                                            // Phase-39: delegate all gate logic to DecisionPipelineEngine
+                                            FinalDecision decision = decisionPipelineEngine.buildDecision(
                                                 event, results, latencyMs, adaptiveWeights,
                                                 regime[0], aiDecision, capturedSession[0],
-                                                divergenceStreak, directionalBias, replayMode);
+                                                divergenceStreak, directionalBias, momentumState,
+                                                govDecision, replayMode);
 
                                             // ── Enrich DecisionContext (post-AI snapshot) ──
-                                            String modelLabel = ModelSelector.resolveLabel(regime[0]);
-                                            DecisionContext enriched = reflectedCtx.withAIDecision(
+                                            String modelLabel = ModelSelector.resolveLabel(regime[0], peakModeRef[0]);
+                                            DecisionContext enriched = peakCtxRef[0].withAIDecision(
                                                 aiDecision, decision.consensusScore(),
                                                 decision.divergenceFlag(), modelLabel);
                                             decisionFlowLogger.logDecisionContext(enriched, event.traceId());
@@ -226,7 +284,7 @@ public class OrchestratorService {
                                             decisionFlowLogger.logWithTraceId(
                                                 DecisionFlowLogger.EVENTS_DISPATCHED, decision.traceId());
                                             return decision.agents();
-                                        });  // closes .map(aiDecision -> {
+                                        });  // closes .map(tuple -> { [Phase-43: zip(aiMono, governorMono)]
                                 }));
                 })
                 .doOnError(e -> log.error("Orchestration failed for symbol={}", event.symbol(), e))
@@ -306,168 +364,6 @@ public class OrchestratorService {
                 log.warn("[StrategyMemory] Fetch failed (non-critical). symbol={} reason={}", symbol, e.getMessage());
                 return Mono.just(List.of());
             });
-    }
-
-    /**
-     * Assembles the v7 {@link FinalDecision}.
-     *
-     * <p>The AI strategist's {@code finalSignal} and {@code confidence} are used as the
-     * primary output. The consensus engine is run via {@link ConsensusIntegrationGuard}
-     * and its {@code normalizedConfidence} is retained as {@code consensusScore} — the
-     * safety guardrail metric tracked alongside the AI recommendation.
-     *
-     * <p><strong>Divergence awareness (v7):</strong> when the AI signal differs from the
-     * consensus signal, {@code divergenceFlag} is set to {@code true}. This enables
-     * downstream observability and historical analysis of AI-vs-consensus alignment.
-     *
-     * @param aiDecision AI strategist recommendation (primary intelligence)
-     */
-    private FinalDecision buildDecision(MarketDataEvent event, List<AnalysisResult> results,
-                                        long latencyMs, Map<String, Double> adaptiveWeights,
-                                        MarketRegime regime, AIStrategyDecision aiDecision,
-                                        TradingSession session, int divergenceStreak,
-                                        DirectionalBias directionalBias, boolean replayMode) {
-        // Consensus runs as safety guardrail — its normalizedConfidence is stored
-        // alongside the AI signal for observability and divergence tracking.
-        // Passes adaptiveWeights so the guardrail uses historically-informed weights (Path 1).
-        ConsensusResult consensus = ConsensusIntegrationGuard.resolve(results, consensusEngine, adaptiveWeights);
-
-        // v7 — divergence awareness: AI signal vs consensus signal (always computed pre-override)
-        boolean divergenceFlag = !aiDecision.finalSignal().equals(consensus.finalSignal());
-
-        // Path 12 — Divergence Safety Override: may replace AI signal or dampen confidence
-        DivergenceGuard.OverrideResult override = DivergenceGuard.evaluate(
-            aiDecision.finalSignal(), aiDecision.confidence(),
-            consensus.finalSignal(), consensus.normalizedConfidence(),
-            divergenceFlag, divergenceStreak);
-
-        if (override.overrideApplied()) {
-            log.info("[DivergenceGuard] Override applied. reason={} traceId={}", override.reason(), event.traceId());
-        }
-
-        // ── Phase-35 Gate 1: Authority Chain — AI can only be overridden DOWNWARD (to WATCH/HOLD) ──
-        String workingSignal     = override.finalSignal();
-        double workingConfidence = override.confidence();
-        boolean overrideKept     = override.overrideApplied();
-        String  overrideReason   = override.reason();
-
-        boolean overrideIsPassive = "WATCH".equals(workingSignal) || "HOLD".equals(workingSignal);
-        if (overrideKept && !overrideIsPassive) {
-            log.info("[Phase35-AuthorityChain] Blocked upward override. consensus={} keeping ai={} traceId={}",
-                workingSignal, aiDecision.finalSignal(), event.traceId());
-            workingSignal     = aiDecision.finalSignal();
-            workingConfidence = aiDecision.confidence();
-            overrideKept      = false;
-            overrideReason    = null;
-        }
-
-        // ── Phase-35 Gate 2: Session gate — MIDDAY_CONSOLIDATION / OFF_HOURS → force WATCH ──
-        if (session == TradingSession.MIDDAY_CONSOLIDATION || session == TradingSession.OFF_HOURS) {
-            if ("BUY".equals(workingSignal) || "SELL".equals(workingSignal)) {
-                log.info("[Phase35-SessionGate] {} forced WATCH. session={} traceId={}",
-                    workingSignal, session, event.traceId());
-                workingSignal = "WATCH";
-            }
-        }
-
-        // ── Phase-35 Gate 3: Directional bias gate ──
-        if ("BUY".equals(workingSignal) &&
-                (directionalBias == DirectionalBias.BEARISH || directionalBias == DirectionalBias.STRONG_BEARISH)) {
-            log.info("[Phase35-BiasGate] BUY blocked in {} market. traceId={}", directionalBias, event.traceId());
-            workingSignal = "WATCH";
-        }
-        if ("SELL".equals(workingSignal) &&
-                (directionalBias == DirectionalBias.BULLISH || directionalBias == DirectionalBias.STRONG_BULLISH)) {
-            log.info("[Phase35-BiasGate] SELL blocked in {} market. traceId={}", directionalBias, event.traceId());
-            workingSignal = "WATCH";
-        }
-
-        // ── Phase-35 Gate 4: Divergence penalty ──
-        if (divergenceFlag) {
-            workingConfidence *= 0.85;
-        }
-        if (divergenceStreak >= 2) {
-            log.info("[Phase35-DivergencePenalty] streak={} forced WATCH. traceId={}", divergenceStreak, event.traceId());
-            workingSignal = "WATCH";
-        }
-
-        // ── Phase-35 Gate 5: Multi-filter — BUY/SELL only if all conditions met ──
-        boolean sessionActive = session == TradingSession.OPENING_BURST || session == TradingSession.POWER_HOUR;
-        if (("BUY".equals(workingSignal) || "SELL".equals(workingSignal))
-                && (workingConfidence < 0.65 || divergenceFlag || !sessionActive)) {
-            log.info("[Phase35-MultiFilter] Filtered to WATCH. confidence={} divergence={} session={} traceId={}",
-                String.format("%.3f", workingConfidence), divergenceFlag, session, event.traceId());
-            workingSignal = "WATCH";
-        }
-
-        // ── Phase-36: TradeEligibilityGuard — hard eligibility gate (BUY/SELL must pass ALL conditions) ──
-        if ("BUY".equals(workingSignal)) {
-            boolean buyEligible = (session == TradingSession.OPENING_BURST || session == TradingSession.POWER_HOUR)
-                && (regime == MarketRegime.VOLATILE || regime == MarketRegime.TRENDING)
-                && (directionalBias == DirectionalBias.BULLISH || directionalBias == DirectionalBias.STRONG_BULLISH)
-                && workingConfidence >= 0.65
-                && !divergenceFlag;
-            if (!buyEligible) {
-                log.info("[Phase36-EligibilityGuard] BUY blocked. session={} regime={} bias={} confidence={} divergence={} traceId={}",
-                    session, regime, directionalBias, String.format("%.3f", workingConfidence), divergenceFlag, event.traceId());
-                workingSignal = "WATCH";
-            }
-        } else if ("SELL".equals(workingSignal)) {
-            boolean sellEligible = session == TradingSession.OPENING_BURST
-                && regime == MarketRegime.VOLATILE
-                && (directionalBias == DirectionalBias.BEARISH || directionalBias == DirectionalBias.STRONG_BEARISH)
-                && workingConfidence >= 0.65
-                && !divergenceFlag;
-            if (!sellEligible) {
-                log.info("[Phase36-EligibilityGuard] SELL blocked. session={} regime={} bias={} confidence={} divergence={} traceId={}",
-                    session, regime, directionalBias, String.format("%.3f", workingConfidence), divergenceFlag, event.traceId());
-                workingSignal = "WATCH";
-            }
-        }
-
-        String finalReasoning = overrideKept
-            ? aiDecision.reasoning() + " [OVERRIDE: " + overrideReason + "]"
-            : aiDecision.reasoning();
-
-        Map<String, Long> signalVotes = results.stream()
-            .collect(Collectors.groupingBy(AnalysisResult::signal, Collectors.counting()));
-
-        Map<String, Object> metadata = new HashMap<>();
-        metadata.put("agentCount", results.size());
-        metadata.put("signalVotes", signalVotes);
-        metadata.put("decision_mode", replayMode ? "REPLAY_CONSENSUS_ONLY" : "LIVE_AI");
-
-        // Phase-33: resolve tradeDirection from final working signal
-        String tradeDirection = com.agentplatform.common.model.TradeDirection.fromSignal(workingSignal).name();
-
-        return FinalDecision.v9(
-            event.symbol(),
-            event.triggeredAt(),
-            results,
-            workingSignal,                     // Phase-35 gated final signal
-            workingConfidence,                 // Phase-35 adjusted confidence
-            metadata,
-            event.traceId(),
-            DECISION_VERSION,
-            orchestratorVersion,
-            results.size(),
-            latencyMs,
-            consensus.normalizedConfidence(),  // consensus score as safety guardrail metric
-            consensus.agentWeights(),
-            adaptiveWeights,
-            regime,
-            finalReasoning,
-            divergenceFlag,                    // v7 divergence awareness (pre-override, raw AI vs consensus)
-            // v8 scalping intelligence
-            session != null ? session.name() : null,
-            aiDecision.entryPrice(),
-            aiDecision.targetPrice(),
-            aiDecision.stopLoss(),
-            aiDecision.estimatedHoldMinutes(),
-            // v9 directional bias
-            tradeDirection,
-            directionalBias != null ? directionalBias.name() : null
-        );
     }
 
     /**

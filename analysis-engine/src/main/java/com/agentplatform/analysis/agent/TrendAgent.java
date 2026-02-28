@@ -2,6 +2,7 @@ package com.agentplatform.analysis.agent;
 
 import com.agentplatform.analysis.indicator.TechnicalIndicators;
 import com.agentplatform.common.cognition.DirectionalBias;
+import com.agentplatform.common.cognition.MomentumState;
 import com.agentplatform.common.exception.AgentException;
 import com.agentplatform.common.model.AnalysisResult;
 import com.agentplatform.common.model.Context;
@@ -50,9 +51,12 @@ public class TrendAgent implements AnalysisAgent {
         // Phase-33: 5-vote directional bias score
         DirectionalBias bias = computeDirectionalBias(trend, macd, currentPrice, sma20, ema12, prices);
 
+        // Phase-40: 3-candle momentum state for OPENING_PHASE_3 gate
+        MomentumState momentumState = computeMomentumState(prices);
+
         String summary = String.format(
-            "Trend: %s | Price=%.2f | SMA20=%.2f | SMA50=%.2f | MACD=%.4f | StdDev=%.2f | Bias: %s → Signal: %s",
-            trend, currentPrice, isNaN(sma20), isNaN(sma50), isNaN(macd), isNaN(stdDev), bias.name(), signal
+            "Trend: %s | Price=%.2f | SMA20=%.2f | SMA50=%.2f | MACD=%.4f | StdDev=%.2f | Bias: %s | Momentum: %s → Signal: %s",
+            trend, currentPrice, isNaN(sma20), isNaN(sma50), isNaN(macd), isNaN(stdDev), bias.name(), momentumState.name(), signal
         );
 
         Map<String, Object> metadata = new HashMap<>();
@@ -63,7 +67,8 @@ public class TrendAgent implements AnalysisAgent {
         metadata.put("ema12",          Double.isNaN(ema12) ? "N/A" : ema12);
         metadata.put("macd",           Double.isNaN(macd) ? "N/A" : macd);
         metadata.put("stdDev",         Double.isNaN(stdDev) ? "N/A" : stdDev);
-        metadata.put("directionalBias", bias.name());
+        metadata.put("directionalBias",  bias.name());
+        metadata.put("momentumState",    momentumState.name()); // Phase-40
 
         return AnalysisResult.of(agentName(), summary, signal, confidence, metadata);
     }
@@ -135,6 +140,21 @@ public class TrendAgent implements AnalysisAgent {
             else if (cv > 0.03) base -= 0.1;
         }
         return Math.min(Math.max(base, 0.0), 1.0);
+    }
+
+    /**
+     * Phase-40: 3-candle price momentum state.
+     * prices[0] = most recent, prices[1] = 1 candle ago, prices[2] = 2 candles ago.
+     */
+    private MomentumState computeMomentumState(List<Double> prices) {
+        if (prices.size() < 3) return MomentumState.UNKNOWN;
+        double p0 = prices.get(0);
+        double p1 = prices.get(1);
+        double p2 = prices.get(2);
+        if (p0 > p1 && p1 > p2) return MomentumState.RISING;
+        if (p0 < p1)             return MomentumState.FALLING;
+        // p0 >= p1 but p1 <= p2 → deceleration
+        return MomentumState.WEAKENING;
     }
 
     private double isNaN(double v) { return Double.isNaN(v) ? 0 : v; }

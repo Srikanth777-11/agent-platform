@@ -119,4 +119,15 @@ public class DecisionHistory {
 
     /** LIVE_AI | REPLAY_CONSENSUS_ONLY — prevents replay data from polluting edge registry */
     private String decisionMode;
+
+    // ── v11 Phase-41 multi-horizon outcome fields ─────────────────────────────
+
+    /** 1-candle P&L % — set at first resolution (same timing as outcomePercent) */
+    private Double outcome1c;
+
+    /** 3-candle P&L % — set if trade was held for ≥ 15 minutes */
+    private Double outcome3c;
+
+    /** FAST_WIN | SLOW_WIN | STOP_OUT | TARGET_HIT | NO_EDGE */
+    private String outcomeLabel;
 }

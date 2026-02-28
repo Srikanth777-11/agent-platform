@@ -2,6 +2,7 @@ package com.agentplatform.trade.controller;
 
 import com.agentplatform.common.model.TradeReflectionStats;
 import com.agentplatform.trade.dto.ActiveTradeResponse;
+import com.agentplatform.trade.dto.DailyRiskStateDTO;
 import com.agentplatform.trade.dto.TradeExitRequest;
 import com.agentplatform.trade.dto.TradeStartRequest;
 import com.agentplatform.trade.model.TradeSession;
@@ -67,6 +68,16 @@ public class TradeController {
     public Mono<ResponseEntity<Map<String, TradeReflectionStats>>> reflectionStats() {
         log.info("Reflection stats query received");
         return Mono.just(ResponseEntity.ok(tradeService.getReflectionStats()));
+    }
+
+    /**
+     * Phase-43: Daily risk state for DailyRiskGovernor (agent-orchestrator).
+     * Returns kill switch status, consecutive losses, daily P&L.
+     */
+    @GetMapping("/daily-risk-state")
+    public Mono<ResponseEntity<DailyRiskStateDTO>> dailyRiskState(@RequestParam String symbol) {
+        log.info("Daily risk state query. symbol={}", symbol);
+        return Mono.just(ResponseEntity.ok(tradeService.getDailyRiskState(symbol)));
     }
 
     @GetMapping("/health")

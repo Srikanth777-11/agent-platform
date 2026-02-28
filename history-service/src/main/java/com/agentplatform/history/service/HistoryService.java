@@ -70,7 +70,7 @@ public class HistoryService {
                     h.getMarketRegime(), h.getDivergenceFlag(), h.getAiReasoning(), h.getSavedAt(),
                     h.getTradingSession(), h.getEntryPrice(), h.getTargetPrice(),
                     h.getStopLoss(), h.getEstimatedHoldMinutes(),
-                    h.getTradeDirection(), h.getDirectionalBias());
+                    h.getTradeDirection(), h.getDirectionalBias(), h.getOutcomeLabel());
                 snapshotSink.tryEmitNext(event);
             })
             .flatMap(saved -> updateProjections(decision, saved)
@@ -643,7 +643,7 @@ public class HistoryService {
                 d.getMarketRegime(), d.getDivergenceFlag(), d.getAiReasoning(), d.getSavedAt(),
                 d.getTradingSession(), d.getEntryPrice(), d.getTargetPrice(),
                 d.getStopLoss(), d.getEstimatedHoldMinutes(),
-                d.getTradeDirection(), d.getDirectionalBias()));
+                d.getTradeDirection(), d.getDirectionalBias(), d.getOutcomeLabel()));
     }
 
     // ── Phase-26: Observation Analytics ────────────────────────────────────
@@ -732,6 +732,34 @@ public class HistoryService {
         return (double) s.stream().filter(d -> d.getOutcomePercent() > 0).count() / s.size();
     }
 
+    /**
+     * Phase-41: Classifies the trade outcome into a quality label.
+     *
+     * <ul>
+     *   <li>TARGET_HIT  — price reached or exceeded target before stop</li>
+     *   <li>STOP_OUT    — price crossed stop loss</li>
+     *   <li>FAST_WIN    — profitable exit within 1 candle (≤ 5 min)</li>
+     *   <li>SLOW_WIN    — profitable but took 3+ candles (≥ 15 min)</li>
+     *   <li>NO_EDGE     — not profitable (neither target nor stop — expired)</li>
+     * </ul>
+     */
+    private String computeOutcomeLabel(double outcomePercent, long holdMin,
+                                       Double stopLoss, Double targetPrice,
+                                       Double entryPrice, double currentPrice) {
+        if (targetPrice != null && entryPrice != null && entryPrice > 0) {
+            double targetPct = (targetPrice - entryPrice) / entryPrice * 100.0;
+            if (outcomePercent >= targetPct) return "TARGET_HIT";
+        }
+        if (stopLoss != null && entryPrice != null && entryPrice > 0) {
+            double stopPct = (stopLoss - entryPrice) / entryPrice * 100.0;
+            if (outcomePercent <= stopPct) return "STOP_OUT";
+        }
+        if (outcomePercent > 0 && holdMin <= 5)  return "FAST_WIN";
+        if (outcomePercent > 0 && holdMin >= 15) return "SLOW_WIN";
+        if (outcomePercent > 0)                  return "FAST_WIN"; // within 5-15 min window
+        return "NO_EDGE";
+    }
+
     private double round(double v) { return Math.round(v * 1000.0) / 1000.0; }
 
     // ── Phase-24: P&L Outcome Learning Loop ────────────────────────────────
@@ -768,7 +796,7 @@ public class HistoryService {
                 d.getMarketRegime(), d.getDivergenceFlag(), d.getAiReasoning(), d.getSavedAt(),
                 d.getTradingSession(), d.getEntryPrice(), d.getTargetPrice(),
                 d.getStopLoss(), d.getEstimatedHoldMinutes(),
-                d.getTradeDirection(), d.getDirectionalBias()));
+                d.getTradeDirection(), d.getDirectionalBias(), d.getOutcomeLabel()));
     }
 
     /**
@@ -820,6 +848,14 @@ public class HistoryService {
                 d.setOutcomePercent(outcomePercent);
                 d.setOutcomeHoldMinutes((int) holdMin);
                 d.setOutcomeResolved(true);
+
+                // Phase-41: multi-horizon outcome labels
+                d.setOutcome1c(outcomePercent); // 1-candle = first resolution price
+                if (holdMin >= 15) {
+                    d.setOutcome3c(outcomePercent); // 3-candle proxy: held 3+ candles (≥15 min)
+                }
+                d.setOutcomeLabel(computeOutcomeLabel(outcomePercent, holdMin,
+                    d.getStopLoss(), d.getTargetPrice(), d.getEntryPrice(), currentPrice));
 
                 final double finalOutcome   = outcomePercent;
                 final String finalSignal    = d.getFinalSignal();

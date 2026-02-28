@@ -11,9 +11,11 @@ import java.time.ZonedDateTime;
  *
  * <p>No external calls. No Spring dependency.
  *
- * <h3>Session boundaries (India Standard Time — IST)</h3>
+ * <h3>Session boundaries (India Standard Time — IST) — Phase-40 micro-sessions</h3>
  * <pre>
- *   OPENING_BURST        09:15 – 10:15  (NSE open + first hour momentum)
+ *   OPENING_PHASE_1      09:15 – 09:25  (price discovery — strict gates)
+ *   OPENING_PHASE_2      09:25 – 09:40  (directional expansion — prime scalping window)
+ *   OPENING_PHASE_3      09:40 – 10:15  (continuation or trap — momentum gated)
  *   MIDDAY_CONSOLIDATION 10:15 – 14:30  (low-volatility dead zone)
  *   POWER_HOUR           14:30 – 15:30  (institutional close activity)
  *   OFF_HOURS            15:30 – 09:15  (next day), weekends
@@ -23,15 +25,18 @@ public final class TradingSessionClassifier {
 
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
 
-    private static final LocalTime OPEN_START   = LocalTime.of(9,  15);
-    private static final LocalTime MIDDAY_START = LocalTime.of(10, 15);
-    private static final LocalTime POWER_START  = LocalTime.of(14, 30);
-    private static final LocalTime MARKET_CLOSE = LocalTime.of(15, 30);
+    private static final LocalTime OPEN_START      = LocalTime.of(9,  15);
+    private static final LocalTime PHASE2_START    = LocalTime.of(9,  25); // Phase-40
+    private static final LocalTime PHASE3_START    = LocalTime.of(9,  40); // Phase-40
+    private static final LocalTime MIDDAY_START    = LocalTime.of(10, 15);
+    private static final LocalTime POWER_START     = LocalTime.of(14, 30);
+    private static final LocalTime MARKET_CLOSE    = LocalTime.of(15, 30);
 
     private TradingSessionClassifier() {}
 
     /**
      * Classifies the intraday session for the given UTC instant.
+     * Phase-40: OPENING_BURST is now sub-divided into three micro-sessions.
      *
      * @param now UTC timestamp of the event trigger
      * @return {@link TradingSession} — never null
@@ -43,7 +48,9 @@ public final class TradingSessionClassifier {
 
         LocalTime time = ist.toLocalTime();
         if (time.isBefore(OPEN_START))   return TradingSession.OFF_HOURS;
-        if (time.isBefore(MIDDAY_START)) return TradingSession.OPENING_BURST;
+        if (time.isBefore(PHASE2_START)) return TradingSession.OPENING_PHASE_1;  // 09:15–09:25
+        if (time.isBefore(PHASE3_START)) return TradingSession.OPENING_PHASE_2;  // 09:25–09:40
+        if (time.isBefore(MIDDAY_START)) return TradingSession.OPENING_PHASE_3;  // 09:40–10:15
         if (time.isBefore(POWER_START))  return TradingSession.MIDDAY_CONSOLIDATION;
         if (time.isBefore(MARKET_CLOSE)) return TradingSession.POWER_HOUR;
         return TradingSession.OFF_HOURS;

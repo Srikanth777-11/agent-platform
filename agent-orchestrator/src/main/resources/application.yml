@@ -17,6 +17,8 @@ services:
     base-url: ${NOTIFICATION_URL:http://localhost:8084}
   history:
     base-url: ${HISTORY_URL:http://localhost:8085}
+  trade:
+    base-url: ${TRADE_URL:http://localhost:8086}
 
 management:
   endpoints:

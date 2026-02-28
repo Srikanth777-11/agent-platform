@@ -38,7 +38,11 @@ CREATE TABLE IF NOT EXISTS decision_history (
     trade_direction        VARCHAR(10),
     directional_bias       VARCHAR(20),
     -- v10 decision mode: LIVE_AI | REPLAY_CONSENSUS_ONLY (used to filter registry training)
-    decision_mode          VARCHAR(30)
+    decision_mode          VARCHAR(30),
+    -- v11 Phase-41 multi-horizon outcome fields (additive — nullable for backward compatibility)
+    outcome_1c             DOUBLE PRECISION,  -- 1-candle P&L % (set at first resolution)
+    outcome_3c             DOUBLE PRECISION,  -- 3-candle P&L % (set if held >= 15 min)
+    outcome_label          VARCHAR(20)        -- FAST_WIN | SLOW_WIN | STOP_OUT | TARGET_HIT | NO_EDGE
 );
 
 -- v8 projection tables & index optimization

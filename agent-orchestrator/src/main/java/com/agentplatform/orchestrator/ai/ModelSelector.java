@@ -37,6 +37,9 @@ public final class ModelSelector {
 
     private ModelSelector() { /* utility class */ }
 
+    /** Human-readable label for peak-mode fast path. */
+    public static final String PEAK_LABEL = "haiku-peak";
+
     /**
      * Selects the appropriate Claude model based on the detected market regime.
      *
@@ -44,6 +47,22 @@ public final class ModelSelector {
      * @return the Claude model identifier to use for the AI strategist call
      */
     public static String selectModel(MarketRegime regime) {
+        return selectModel(regime, false);
+    }
+
+    /**
+     * Phase-44: Peak-mode aware model selection.
+     * Peak mode forces Haiku regardless of regime — speed over depth.
+     *
+     * @param regime   the current market regime (never null)
+     * @param peakMode true when all peak conditions are met
+     * @return the Claude model identifier to use for the AI strategist call
+     */
+    public static String selectModel(MarketRegime regime, boolean peakMode) {
+        if (peakMode) {
+            log.info("AI_MODEL_SELECTED regime={} peakMode=true model={} (peak-mode forced)", regime, CHEAP_MODEL);
+            return CHEAP_MODEL;
+        }
         String selected = (regime == MarketRegime.VOLATILE) ? CHEAP_MODEL : STRONG_MODEL;
         log.info("AI_MODEL_SELECTED regime={} model={}", regime, selected);
         return selected;
@@ -54,6 +73,14 @@ public final class ModelSelector {
      * Pure read-only — no logging, no side effects.
      */
     public static String resolveLabel(MarketRegime regime) {
+        return resolveLabel(regime, false);
+    }
+
+    /**
+     * Phase-44: Peak-mode aware label resolution.
+     */
+    public static String resolveLabel(MarketRegime regime, boolean peakMode) {
+        if (peakMode) return PEAK_LABEL;
         return (regime == MarketRegime.VOLATILE) ? CHEAP_LABEL : STRONG_LABEL;
     }
 }

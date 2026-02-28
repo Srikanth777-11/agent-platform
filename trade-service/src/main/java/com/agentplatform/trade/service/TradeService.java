@@ -11,6 +11,7 @@ import com.agentplatform.trade.client.HistoryServiceClient;
 import com.agentplatform.trade.client.dto.DecisionMetricsResponse;
 import com.agentplatform.trade.client.dto.MarketStateResponse;
 import com.agentplatform.trade.dto.ActiveTradeResponse;
+import com.agentplatform.trade.dto.DailyRiskStateDTO;
 import com.agentplatform.trade.dto.TradeExitRequest;
 import com.agentplatform.trade.dto.TradeStartRequest;
 import com.agentplatform.trade.model.TradeSession;
@@ -50,6 +51,13 @@ public class TradeService {
     private final Map<String, PostureStabilityState> postureStabilityMap = new ConcurrentHashMap<>();
     private final Map<String, TradePosture> postureMap = new ConcurrentHashMap<>();
     private final Map<TradePosture, TradeReflectionStats> reflectionMap = new ConcurrentHashMap<>();
+
+    // Phase-43: Daily intraday risk tracking (in-memory, resets on service restart / new day)
+    private final Map<String, Double>  dailyPnLMap           = new ConcurrentHashMap<>();
+    private final Map<String, Integer> consecutiveLossMap     = new ConcurrentHashMap<>();
+    private final Map<String, Integer> dailyTradeCountMap     = new ConcurrentHashMap<>();
+    private final Map<String, Boolean> killSwitchMap          = new ConcurrentHashMap<>();
+    private final Map<String, String>  killReasonMap          = new ConcurrentHashMap<>();
 
     public TradeService(TradeSessionRepository tradeSessionRepository,
                         RiskSnapshotRepository riskSnapshotRepository,
@@ -103,11 +111,57 @@ public class TradeService {
                         log.info("Reflection updated. posture={} pnl={} stats={}",
                             posture, s.getPnl(), reflectionMap.get(posture));
                     }
+                    // Phase-43: update daily risk state from closed trade
+                    if (s.getPnl() != null && s.getEntryPrice() != null && s.getEntryPrice() > 0) {
+                        String sym = s.getSymbol();
+                        double pnlPct = (s.getPnl() / s.getEntryPrice()) * 100.0;
+                        dailyPnLMap.merge(sym, pnlPct, Double::sum);
+                        dailyTradeCountMap.merge(sym, 1, Integer::sum);
+                        if (pnlPct < 0) {
+                            consecutiveLossMap.merge(sym, 1, Integer::sum);
+                        } else {
+                            consecutiveLossMap.put(sym, 0); // win resets streak
+                        }
+                        log.info("[DailyRisk] Trade closed. symbol={} pnlPct={} dailyPnL={} consecutiveLosses={}",
+                            sym, String.format("%.2f", pnlPct), String.format("%.2f", dailyPnLMap.get(sym)), consecutiveLossMap.get(sym));
+                    }
                     log.info("Trade exited. id={} symbol={} pnl={}",
                         s.getId(), s.getSymbol(), s.getPnl());
                 }
             })
             .doOnError(e -> log.error("Failed to exit trade. symbol={}", request.symbol(), e));
+    }
+
+    /**
+     * Phase-43: Returns the current daily intraday risk state for DailyRiskGovernor.
+     * Evaluates kill conditions on-the-fly from in-memory state.
+     * State resets on service restart (accepted trade-off per architecture decision).
+     */
+    public DailyRiskStateDTO getDailyRiskState(String symbol) {
+        double  dailyPnL           = dailyPnLMap.getOrDefault(symbol, 0.0);
+        int     consecutiveLosses  = consecutiveLossMap.getOrDefault(symbol, 0);
+        int     dailyTradeCount    = dailyTradeCountMap.getOrDefault(symbol, 0);
+        boolean kill               = killSwitchMap.getOrDefault(symbol, false);
+        String  killReason         = killReasonMap.get(symbol);
+
+        // Evaluate kill conditions if not already triggered
+        if (!kill) {
+            if (dailyPnL <= -1.5) {
+                kill = true; killReason = "dailyLoss >= 1.5R";
+                killSwitchMap.put(symbol, true); killReasonMap.put(symbol, killReason);
+                log.warn("[DailyRiskGovernor] KILL SWITCH triggered. symbol={} reason={}", symbol, killReason);
+            } else if (dailyPnL >= 3.0) {
+                kill = true; killReason = "dailyProfit >= 3R (lock gains)";
+                killSwitchMap.put(symbol, true); killReasonMap.put(symbol, killReason);
+                log.warn("[DailyRiskGovernor] KILL SWITCH triggered. symbol={} reason={}", symbol, killReason);
+            } else if (consecutiveLosses >= 3) {
+                kill = true; killReason = "consecutiveLosses >= 3";
+                killSwitchMap.put(symbol, true); killReasonMap.put(symbol, killReason);
+                log.warn("[DailyRiskGovernor] KILL SWITCH triggered. symbol={} reason={}", symbol, killReason);
+            }
+        }
+
+        return new DailyRiskStateDTO(symbol, dailyPnL, consecutiveLosses, dailyTradeCount, kill, killReason);
     }
 
     /**

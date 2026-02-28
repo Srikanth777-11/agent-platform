@@ -22,6 +22,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -115,16 +116,27 @@ public class AIStrategistService {
             return Mono.just(fallback(decisionCtx.agentResults()));
         }
 
-        String selectedModel = ModelSelector.selectModel(decisionCtx.regime());
+        // Phase-44: peak mode — force Haiku, short prompt, 1200ms timeout
+        boolean isPeakMode = Boolean.TRUE.equals(decisionCtx.peakMode());
+        String selectedModel = ModelSelector.selectModel(decisionCtx.regime(), isPeakMode);
+        int maxTokens  = isPeakMode ? 150 : 300;
+        long timeoutMs = isPeakMode ? 1200L : 4000L;
 
-        return Mono.fromCallable(() -> buildPrompt(marketCtx, decisionCtx.agentResults(),
-                                                   decisionCtx.regime(), decisionCtx.adaptiveWeights(),
-                                                   decisionCtx, priorDecisions))
-            .flatMap(prompt -> callAnthropicApi(prompt, selectedModel))
+        if (isPeakMode) {
+            log.info("[AIStrategist] PEAK MODE active. model={} maxTokens={} timeoutMs={} symbol={}",
+                selectedModel, maxTokens, timeoutMs, marketCtx.symbol());
+        }
+
+        return Mono.fromCallable(() -> isPeakMode
+                ? buildPeakModePrompt(marketCtx, decisionCtx)
+                : buildPrompt(marketCtx, decisionCtx.agentResults(),
+                              decisionCtx.regime(), decisionCtx.adaptiveWeights(),
+                              decisionCtx, priorDecisions))
+            .flatMap(prompt -> callAnthropicApi(prompt, selectedModel, maxTokens, timeoutMs))
             .map(this::parseResponse)
-            .doOnSuccess(d -> log.info("[AIStrategist] Strategy evaluated (with memory). signal={} confidence={} symbol={} memorySize={}",
+            .doOnSuccess(d -> log.info("[AIStrategist] Strategy evaluated (with memory). signal={} confidence={} symbol={} memorySize={} peakMode={}",
                                        d.finalSignal(), d.confidence(), marketCtx.symbol(),
-                                       priorDecisions != null ? priorDecisions.size() : 0))
+                                       priorDecisions != null ? priorDecisions.size() : 0, isPeakMode))
             .onErrorResume(e -> {
                 log.error("[AIStrategist] API call failed — returning rule-based fallback. symbol={} reason={}",
                           marketCtx.symbol(), e.getMessage());
@@ -344,6 +356,46 @@ public class AIStrategistService {
                               : "");
     }
 
+    /**
+     * Phase-44: Compact prompt for peak-mode fast path.
+     * Skips omega/reflection/mood/memory sections. Max tokens: 150.
+     * Active scalping window — always requests entry/exit fields.
+     */
+    private String buildPeakModePrompt(Context context, DecisionContext ctx) {
+        List<Double> prices = context.prices();
+        double latestClose = (prices != null && !prices.isEmpty()) ? prices.get(0) : 0.0;
+
+        StringBuilder agentSummary = new StringBuilder();
+        for (AnalysisResult r : ctx.agentResults()) {
+            double weight = ctx.adaptiveWeights().getOrDefault(r.agentName(), 1.0);
+            agentSummary.append(String.format("  %-20s signal=%-5s conf=%.2f wt=%.2f%n",
+                r.agentName(), r.signal(), r.confidenceScore(), weight));
+        }
+
+        String biasRule = "";
+        if (ctx.directionalBias() != null) {
+            biasRule = switch (ctx.directionalBias()) {
+                case STRONG_BULLISH -> "STRONG BULLISH — signal BUY only";
+                case BULLISH        -> "BULLISH — BUY if agents support";
+                case NEUTRAL        -> "NEUTRAL — prefer WATCH";
+                case BEARISH        -> "BEARISH — SELL if agents support";
+                case STRONG_BEARISH -> "STRONG BEARISH — signal SELL only";
+            };
+        }
+
+        String sessionName = ctx.tradingSession() != null ? ctx.tradingSession().name() : "OPENING";
+
+        return """
+            PEAK-MODE SCALP [%s | VOLATILE] Symbol=%s Close=%.4f
+            Agents:
+            %s
+            Bias: %s
+            BUY=LONG(CE/futures) SELL=SHORT(PE/futures) WATCH=no entry
+            Reply ONLY with JSON:
+            {"finalSignal":"BUY|SELL|WATCH","confidence":0.0-1.0,"reasoning":"<1 sentence>","tradeDirection":"LONG|SHORT|FLAT","entryPrice":<price or null>,"targetPrice":<price or null>,"stopLoss":<price or null>,"estimatedHoldMinutes":<1-15 or null>}
+            """.formatted(sessionName, context.symbol(), latestClose, agentSummary, biasRule);
+    }
+
     private String buildMemorySection(List<Map<String, Object>> priorDecisions) {
         if (priorDecisions == null || priorDecisions.isEmpty()) return "";
         StringBuilder sb = new StringBuilder(
@@ -365,10 +417,19 @@ public class AIStrategistService {
 
     // ── Anthropic API call (fully reactive — no .block()) ────────────────────
 
+    /** Backward-compat overload — standard 300 tokens, 4000ms timeout. */
     private Mono<String> callAnthropicApi(String prompt, String modelName) {
+        return callAnthropicApi(prompt, modelName, 300, 4000L);
+    }
+
+    /**
+     * Phase-44: Parameterised Anthropic call with variable token budget and timeout.
+     * Peak mode uses maxTokens=150, timeoutMs=1200 → on timeout falls back to consensus.
+     */
+    private Mono<String> callAnthropicApi(String prompt, String modelName, int maxTokens, long timeoutMs) {
         Map<String, Object> requestBody = Map.of(
             "model", modelName,
-            "max_tokens", 300,
+            "max_tokens", maxTokens,
             "messages", List.of(Map.of("role", "user", "content", prompt))
         );
 
@@ -380,6 +441,7 @@ public class AIStrategistService {
                     .bodyValue(bodyJson)
                     .retrieve()
                     .bodyToMono(String.class)
+                    .timeout(Duration.ofMillis(timeoutMs))
             )
             .map(response -> {
                 try {

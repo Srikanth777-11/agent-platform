@@ -26,5 +26,7 @@ public record SnapshotDecisionDTO(
     @JsonProperty("estimatedHoldMinutes")  Integer estimatedHoldMinutes,
     // v9 directional bias fields
     @JsonProperty("tradeDirection")        String tradeDirection,
-    @JsonProperty("directionalBias")       String directionalBias
+    @JsonProperty("directionalBias")       String directionalBias,
+    // v11 Phase-41 outcome label
+    @JsonProperty("outcomeLabel")          String outcomeLabel
 ) {}

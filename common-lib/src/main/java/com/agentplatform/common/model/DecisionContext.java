@@ -4,6 +4,7 @@ import com.agentplatform.common.cognition.CalmMood;
 import com.agentplatform.common.cognition.CalmTrajectory;
 import com.agentplatform.common.cognition.DirectionalBias;
 import com.agentplatform.common.cognition.DivergenceTrajectory;
+import com.agentplatform.common.cognition.MomentumState;
 import com.agentplatform.common.cognition.ReflectionPersistence;
 import com.agentplatform.common.cognition.ReflectionState;
 import com.agentplatform.common.cognition.TradingSession;
@@ -62,6 +63,9 @@ import java.util.Map;
  *   <li>{@code calmMood}             — nullable; Phase-20 operator emotional state (CALM/BALANCED/PRESSURED)</li>
  *   <li>{@code reflectionPersistence} — nullable; Phase-21 rolling-window label (STABLE/SOFT_DRIFT/HARD_DRIFT/CHRONIC_INSTABILITY)</li>
  *   <li>{@code tradingSession}        — nullable; Phase-22 intraday session (OPENING_BURST/MIDDAY_CONSOLIDATION/POWER_HOUR/OFF_HOURS)</li>
+ *   <li>{@code directionalBias}       — nullable; Phase-33 5-vote market direction from TrendAgent</li>
+ *   <li>{@code momentumState}         — nullable; Phase-40 3-candle per-cycle price momentum direction</li>
+ *   <li>{@code peakMode}              — nullable; Phase-44 true when OPENING_PHASE_1/2 + VOLATILE + no divergence + confidence rising</li>
  * </ul>
  */
 public record DecisionContext(
@@ -89,7 +93,11 @@ public record DecisionContext(
     // Phase-22 TradingSession — nullable; intraday session window for scalping awareness
     TradingSession            tradingSession,
     // Phase-33 DirectionalBias — nullable; 5-vote market direction from TrendAgent
-    DirectionalBias           directionalBias
+    DirectionalBias           directionalBias,
+    // Phase-40 MomentumState — nullable; 3-candle per-cycle price momentum direction
+    MomentumState             momentumState,
+    // Phase-44 PeakMode — nullable; true when all peak conditions met (fast-path AI)
+    Boolean                   peakMode
 ) {
 
     /**
@@ -114,7 +122,9 @@ public record DecisionContext(
             null,   // calmMood             — Phase-20: enriched after Reflection
             null,   // reflectionPersistence — Phase-21: enriched with rolling window
             null,   // tradingSession        — Phase-22: enriched with session classification
-            null    // directionalBias       — Phase-33: enriched after TrendAgent analysis
+            null,   // directionalBias       — Phase-33: enriched after TrendAgent analysis
+            null,   // momentumState         — Phase-40: enriched after TrendAgent analysis
+            null    // peakMode              — Phase-44: set before AI call
         );
     }
 
@@ -134,7 +144,7 @@ public record DecisionContext(
             consensusScore, aiDecision, divergenceFlag, modelLabel,
             this.stabilityPressure, this.calmTrajectory, this.divergenceTrajectory,
             this.reflectionState, this.calmMood, this.reflectionPersistence,
-            this.tradingSession, this.directionalBias
+            this.tradingSession, this.directionalBias, this.momentumState, this.peakMode
         );
     }
 
@@ -152,7 +162,7 @@ public record DecisionContext(
             this.consensusScore, this.aiDecision, this.divergenceFlag, this.modelLabel,
             stabilityPressure, calmTrajectory, divergenceTrajectory,
             this.reflectionState, this.calmMood, this.reflectionPersistence,
-            this.tradingSession, this.directionalBias
+            this.tradingSession, this.directionalBias, this.momentumState, this.peakMode
         );
     }
 
@@ -168,7 +178,7 @@ public record DecisionContext(
             this.consensusScore, this.aiDecision, this.divergenceFlag, this.modelLabel,
             this.stabilityPressure, this.calmTrajectory, this.divergenceTrajectory,
             reflectionState, this.calmMood, this.reflectionPersistence,
-            this.tradingSession, this.directionalBias
+            this.tradingSession, this.directionalBias, this.momentumState, this.peakMode
         );
     }
 
@@ -192,7 +202,7 @@ public record DecisionContext(
             this.consensusScore, this.aiDecision, this.divergenceFlag, this.modelLabel,
             this.stabilityPressure, this.calmTrajectory, this.divergenceTrajectory,
             reflectionState, calmMood, reflectionPersistence,
-            this.tradingSession, this.directionalBias
+            this.tradingSession, this.directionalBias, this.momentumState, this.peakMode
         );
     }
 
@@ -207,7 +217,7 @@ public record DecisionContext(
             this.consensusScore, this.aiDecision, this.divergenceFlag, this.modelLabel,
             this.stabilityPressure, this.calmTrajectory, this.divergenceTrajectory,
             this.reflectionState, calmMood, this.reflectionPersistence,
-            this.tradingSession, this.directionalBias
+            this.tradingSession, this.directionalBias, this.momentumState, this.peakMode
         );
     }
 
@@ -222,7 +232,7 @@ public record DecisionContext(
             this.consensusScore, this.aiDecision, this.divergenceFlag, this.modelLabel,
             this.stabilityPressure, this.calmTrajectory, this.divergenceTrajectory,
             this.reflectionState, this.calmMood, this.reflectionPersistence,
-            tradingSession, this.directionalBias
+            tradingSession, this.directionalBias, this.momentumState, this.peakMode
         );
     }
 
@@ -237,7 +247,39 @@ public record DecisionContext(
             this.consensusScore, this.aiDecision, this.divergenceFlag, this.modelLabel,
             this.stabilityPressure, this.calmTrajectory, this.divergenceTrajectory,
             this.reflectionState, this.calmMood, this.reflectionPersistence,
-            this.tradingSession, directionalBias
+            this.tradingSession, directionalBias, this.momentumState, this.peakMode
+        );
+    }
+
+    /**
+     * Phase-40 MomentumState enrichment copy-factory.
+     * Called after TrendAgent metadata is extracted, alongside directionalBias.
+     */
+    public DecisionContext withMomentumState(MomentumState momentumState) {
+        return new DecisionContext(
+            this.symbol, this.timestamp, this.traceId, this.regime,
+            this.agentResults, this.adaptiveWeights, this.latestClose,
+            this.consensusScore, this.aiDecision, this.divergenceFlag, this.modelLabel,
+            this.stabilityPressure, this.calmTrajectory, this.divergenceTrajectory,
+            this.reflectionState, this.calmMood, this.reflectionPersistence,
+            this.tradingSession, this.directionalBias, momentumState, this.peakMode
+        );
+    }
+
+    /**
+     * Phase-44 PeakMode enrichment copy-factory.
+     * Set by OrchestratorService before the AI call when all peak conditions are met:
+     * session ∈ {OPENING_PHASE_1, OPENING_PHASE_2}, regime=VOLATILE,
+     * divergenceStreak=0, and previous cycle confidence ≥ 0.65.
+     */
+    public DecisionContext withPeakMode(boolean peakMode) {
+        return new DecisionContext(
+            this.symbol, this.timestamp, this.traceId, this.regime,
+            this.agentResults, this.adaptiveWeights, this.latestClose,
+            this.consensusScore, this.aiDecision, this.divergenceFlag, this.modelLabel,
+            this.stabilityPressure, this.calmTrajectory, this.divergenceTrajectory,
+            this.reflectionState, this.calmMood, this.reflectionPersistence,
+            this.tradingSession, this.directionalBias, this.momentumState, peakMode
         );
     }
 }
