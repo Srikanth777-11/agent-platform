@@ -23,5 +23,8 @@ public record SnapshotDecisionDTO(
     @JsonProperty("entryPrice")            Double entryPrice,
     @JsonProperty("targetPrice")           Double targetPrice,
     @JsonProperty("stopLoss")              Double stopLoss,
-    @JsonProperty("estimatedHoldMinutes")  Integer estimatedHoldMinutes
+    @JsonProperty("estimatedHoldMinutes")  Integer estimatedHoldMinutes,
+    // v9 directional bias fields
+    @JsonProperty("tradeDirection")        String tradeDirection,
+    @JsonProperty("directionalBias")       String directionalBias
 ) {}

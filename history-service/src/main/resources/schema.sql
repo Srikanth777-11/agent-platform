@@ -33,7 +33,10 @@ CREATE TABLE IF NOT EXISTS decision_history (
     -- v8 P&L outcome fields (populated ~5-10 min after decision by outcome tracker)
     outcome_percent        DOUBLE PRECISION,
     outcome_hold_minutes   INT,
-    outcome_resolved       BOOLEAN
+    outcome_resolved       BOOLEAN,
+    -- v9 directional bias fields (additive — nullable for backward compatibility)
+    trade_direction        VARCHAR(10),
+    directional_bias       VARCHAR(20)
 );
 
 -- v8 projection tables & index optimization

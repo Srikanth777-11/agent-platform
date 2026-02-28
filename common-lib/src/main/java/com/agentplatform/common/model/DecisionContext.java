@@ -2,6 +2,7 @@ package com.agentplatform.common.model;
 
 import com.agentplatform.common.cognition.CalmMood;
 import com.agentplatform.common.cognition.CalmTrajectory;
+import com.agentplatform.common.cognition.DirectionalBias;
 import com.agentplatform.common.cognition.DivergenceTrajectory;
 import com.agentplatform.common.cognition.ReflectionPersistence;
 import com.agentplatform.common.cognition.ReflectionState;
@@ -86,7 +87,9 @@ public record DecisionContext(
     // Phase-21 ReflectionPersistence — nullable; rolling-window label (last 5 reflectionStates)
     ReflectionPersistence     reflectionPersistence,
     // Phase-22 TradingSession — nullable; intraday session window for scalping awareness
-    TradingSession            tradingSession
+    TradingSession            tradingSession,
+    // Phase-33 DirectionalBias — nullable; 5-vote market direction from TrendAgent
+    DirectionalBias           directionalBias
 ) {
 
     /**
@@ -110,7 +113,8 @@ public record DecisionContext(
             null,   // reflectionState      — Phase-19: enriched after Omega
             null,   // calmMood             — Phase-20: enriched after Reflection
             null,   // reflectionPersistence — Phase-21: enriched with rolling window
-            null    // tradingSession        — Phase-22: enriched with session classification
+            null,   // tradingSession        — Phase-22: enriched with session classification
+            null    // directionalBias       — Phase-33: enriched after TrendAgent analysis
         );
     }
 
@@ -130,7 +134,7 @@ public record DecisionContext(
             consensusScore, aiDecision, divergenceFlag, modelLabel,
             this.stabilityPressure, this.calmTrajectory, this.divergenceTrajectory,
             this.reflectionState, this.calmMood, this.reflectionPersistence,
-            this.tradingSession
+            this.tradingSession, this.directionalBias
         );
     }
 
@@ -148,7 +152,7 @@ public record DecisionContext(
             this.consensusScore, this.aiDecision, this.divergenceFlag, this.modelLabel,
             stabilityPressure, calmTrajectory, divergenceTrajectory,
             this.reflectionState, this.calmMood, this.reflectionPersistence,
-            this.tradingSession
+            this.tradingSession, this.directionalBias
         );
     }
 
@@ -164,7 +168,7 @@ public record DecisionContext(
             this.consensusScore, this.aiDecision, this.divergenceFlag, this.modelLabel,
             this.stabilityPressure, this.calmTrajectory, this.divergenceTrajectory,
             reflectionState, this.calmMood, this.reflectionPersistence,
-            this.tradingSession
+            this.tradingSession, this.directionalBias
         );
     }
 
@@ -188,7 +192,7 @@ public record DecisionContext(
             this.consensusScore, this.aiDecision, this.divergenceFlag, this.modelLabel,
             this.stabilityPressure, this.calmTrajectory, this.divergenceTrajectory,
             reflectionState, calmMood, reflectionPersistence,
-            this.tradingSession
+            this.tradingSession, this.directionalBias
         );
     }
 
@@ -203,7 +207,7 @@ public record DecisionContext(
             this.consensusScore, this.aiDecision, this.divergenceFlag, this.modelLabel,
             this.stabilityPressure, this.calmTrajectory, this.divergenceTrajectory,
             this.reflectionState, calmMood, this.reflectionPersistence,
-            this.tradingSession
+            this.tradingSession, this.directionalBias
         );
     }
 
@@ -218,7 +222,22 @@ public record DecisionContext(
             this.consensusScore, this.aiDecision, this.divergenceFlag, this.modelLabel,
             this.stabilityPressure, this.calmTrajectory, this.divergenceTrajectory,
             this.reflectionState, this.calmMood, this.reflectionPersistence,
-            tradingSession
+            tradingSession, this.directionalBias
+        );
+    }
+
+    /**
+     * Phase-33 DirectionalBias enrichment copy-factory.
+     * Called after TrendAgent analysis results are available, before AI evaluation.
+     */
+    public DecisionContext withDirectionalBias(DirectionalBias directionalBias) {
+        return new DecisionContext(
+            this.symbol, this.timestamp, this.traceId, this.regime,
+            this.agentResults, this.adaptiveWeights, this.latestClose,
+            this.consensusScore, this.aiDecision, this.divergenceFlag, this.modelLabel,
+            this.stabilityPressure, this.calmTrajectory, this.divergenceTrajectory,
+            this.reflectionState, this.calmMood, this.reflectionPersistence,
+            this.tradingSession, directionalBias
         );
     }
 }

@@ -8,6 +8,26 @@ const SIGNAL_COLOR = {
   WATCH: 'text-sky-400',
 };
 
+const DIRECTION_COLOR = {
+  LONG:  'text-emerald-400',
+  SHORT: 'text-rose-400',
+  FLAT:  'text-slate-400',
+};
+
+const DIRECTION_ICON = {
+  LONG:  '\u2191',
+  SHORT: '\u2193',
+  FLAT:  '\u2014',
+};
+
+const BIAS_COLOR = {
+  STRONG_BULLISH: 'text-emerald-400',
+  BULLISH:        'text-emerald-300',
+  NEUTRAL:        'text-slate-400',
+  BEARISH:        'text-rose-300',
+  STRONG_BEARISH: 'text-rose-400',
+};
+
 export default function DetailModal({ data, onClose, marketStates, activeTrade, onTradeStart }) {
   const {
     symbol,
@@ -17,6 +37,8 @@ export default function DetailModal({ data, onClose, marketStates, activeTrade, 
     divergenceFlag,
     aiReasoning,
     savedAt,
+    tradeDirection,
+    directionalBias,
   } = data;
 
   const confidencePct = Math.round((confidence ?? 0) * 100);
@@ -97,6 +119,27 @@ export default function DetailModal({ data, onClose, marketStates, activeTrade, 
                 <p className="text-sm font-semibold text-slate-300 uppercase">{marketRegime || 'UNKNOWN'}</p>
               </div>
             </div>
+            {/* Phase-33: Trade Direction + Directional Bias */}
+            {(tradeDirection || directionalBias) && (
+              <div className="flex items-center gap-4 mt-3 pt-3 border-t border-slate-800/40">
+                {tradeDirection && (
+                  <div>
+                    <p className="text-[10px] font-medium text-slate-500 uppercase tracking-wider mb-1">Trade Direction</p>
+                    <p className={`text-sm font-bold font-mono ${DIRECTION_COLOR[tradeDirection] || 'text-slate-300'}`}>
+                      {DIRECTION_ICON[tradeDirection] || ''} {tradeDirection}
+                    </p>
+                  </div>
+                )}
+                {directionalBias && (
+                  <div>
+                    <p className="text-[10px] font-medium text-slate-500 uppercase tracking-wider mb-1">Directional Bias</p>
+                    <p className={`text-sm font-semibold uppercase ${BIAS_COLOR[directionalBias] || 'text-slate-400'}`}>
+                      {directionalBias.replace('_', ' ')}
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
           </ModalSection>
 
           {/* ── AI Reasoning Block ───────────────────────── */}
@@ -154,7 +197,7 @@ export default function DetailModal({ data, onClose, marketStates, activeTrade, 
             {savedAt ? formatTimeFull(savedAt) : '--'}
           </span>
           <span className="text-[10px] text-slate-600 uppercase tracking-wider">
-            Snapshot v7
+            Snapshot v9
           </span>
         </div>
       </motion.div>

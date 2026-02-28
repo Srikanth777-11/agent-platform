@@ -66,7 +66,8 @@ public class HistoryService {
                     h.getSymbol(), h.getFinalSignal(), h.getConfidenceScore(),
                     h.getMarketRegime(), h.getDivergenceFlag(), h.getAiReasoning(), h.getSavedAt(),
                     h.getTradingSession(), h.getEntryPrice(), h.getTargetPrice(),
-                    h.getStopLoss(), h.getEstimatedHoldMinutes());
+                    h.getStopLoss(), h.getEstimatedHoldMinutes(),
+                    h.getTradeDirection(), h.getDirectionalBias());
                 snapshotSink.tryEmitNext(event);
             })
             .flatMap(saved -> updateProjections(decision, saved)
@@ -214,6 +215,9 @@ public class HistoryService {
             entity.setTargetPrice(decision.targetPrice());
             entity.setStopLoss(decision.stopLoss());
             entity.setEstimatedHoldMinutes(decision.estimatedHoldMinutes());
+            // v9 directional bias — null-safe for legacy FinalDecision instances
+            entity.setTradeDirection(decision.tradeDirection());
+            entity.setDirectionalBias(decision.directionalBias());
             return entity;
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize FinalDecision for persistence", e);
@@ -536,7 +540,8 @@ public class HistoryService {
                 h.getSymbol(), h.getFinalSignal(), h.getConfidenceScore(),
                 h.getMarketRegime(), h.getDivergenceFlag(), h.getAiReasoning(), h.getSavedAt(),
                 h.getTradingSession(), h.getEntryPrice(), h.getTargetPrice(),
-                h.getStopLoss(), h.getEstimatedHoldMinutes()
+                h.getStopLoss(), h.getEstimatedHoldMinutes(),
+                h.getTradeDirection(), h.getDirectionalBias()
             ))
             .doOnComplete(() -> log.debug("Snapshot query completed"))
             .doOnError(e -> log.error("Failed to fetch latest snapshot", e));
@@ -627,7 +632,8 @@ public class HistoryService {
                 d.getSymbol(), d.getFinalSignal(), d.getConfidenceScore(),
                 d.getMarketRegime(), d.getDivergenceFlag(), d.getAiReasoning(), d.getSavedAt(),
                 d.getTradingSession(), d.getEntryPrice(), d.getTargetPrice(),
-                d.getStopLoss(), d.getEstimatedHoldMinutes()));
+                d.getStopLoss(), d.getEstimatedHoldMinutes(),
+                d.getTradeDirection(), d.getDirectionalBias()));
     }
 
     // ── Phase-26: Observation Analytics ────────────────────────────────────
@@ -751,7 +757,8 @@ public class HistoryService {
                 d.getSymbol(), d.getFinalSignal(), d.getConfidenceScore(),
                 d.getMarketRegime(), d.getDivergenceFlag(), d.getAiReasoning(), d.getSavedAt(),
                 d.getTradingSession(), d.getEntryPrice(), d.getTargetPrice(),
-                d.getStopLoss(), d.getEstimatedHoldMinutes()));
+                d.getStopLoss(), d.getEstimatedHoldMinutes(),
+                d.getTradeDirection(), d.getDirectionalBias()));
     }
 
     /**

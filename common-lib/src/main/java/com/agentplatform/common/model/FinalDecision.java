@@ -44,11 +44,43 @@ public record FinalDecision(
     @JsonProperty("entryPrice")            Double  entryPrice,
     @JsonProperty("targetPrice")           Double  targetPrice,
     @JsonProperty("stopLoss")              Double  stopLoss,
-    @JsonProperty("estimatedHoldMinutes")  Integer estimatedHoldMinutes
+    @JsonProperty("estimatedHoldMinutes")  Integer estimatedHoldMinutes,
+
+    // ── v9 directional bias fields (additive — null safe for older records) ─────
+    @JsonProperty("tradeDirection")        String  tradeDirection,
+    @JsonProperty("directionalBias")       String  directionalBias
 ) {
     /**
-     * v8 factory — primary from Phase-22/23 onward.
-     * Includes tradingSession, entryPrice, targetPrice, stopLoss, estimatedHoldMinutes.
+     * v9 factory — primary from Phase-33 onward.
+     * Adds tradeDirection (LONG/SHORT/FLAT) and directionalBias (TrendAgent 5-vote).
+     */
+    public static FinalDecision v9(String symbol, Instant timestamp,
+                                   List<AnalysisResult> agents,
+                                   String finalSignal, double confidenceScore,
+                                   Map<String, Object> metadata, String traceId,
+                                   String decisionVersion, String orchestratorVersion,
+                                   int agentCount, long decisionLatencyMs,
+                                   double consensusScore,
+                                   Map<String, Double> agentWeightSnapshot,
+                                   Map<String, Double> adaptiveAgentWeights,
+                                   MarketRegime marketRegime,
+                                   String aiReasoning,
+                                   Boolean divergenceFlag,
+                                   String tradingSession,
+                                   Double entryPrice, Double targetPrice,
+                                   Double stopLoss, Integer estimatedHoldMinutes,
+                                   String tradeDirection, String directionalBias) {
+        return new FinalDecision(symbol, timestamp, agents, finalSignal, confidenceScore,
+                                 metadata, traceId, decisionVersion, orchestratorVersion,
+                                 agentCount, decisionLatencyMs,
+                                 consensusScore, agentWeightSnapshot,
+                                 adaptiveAgentWeights, marketRegime, aiReasoning, divergenceFlag,
+                                 tradingSession, entryPrice, targetPrice, stopLoss, estimatedHoldMinutes,
+                                 tradeDirection, directionalBias);
+    }
+
+    /**
+     * v8 factory — retained for backward compatibility. v9 fields default to null.
      */
     public static FinalDecision of(String symbol, Instant timestamp,
                                    List<AnalysisResult> agents,
@@ -70,11 +102,12 @@ public record FinalDecision(
                                  agentCount, decisionLatencyMs,
                                  consensusScore, agentWeightSnapshot,
                                  adaptiveAgentWeights, marketRegime, aiReasoning, divergenceFlag,
-                                 tradingSession, entryPrice, targetPrice, stopLoss, estimatedHoldMinutes);
+                                 tradingSession, entryPrice, targetPrice, stopLoss, estimatedHoldMinutes,
+                                 null, null);
     }
 
     /**
-     * v7 factory — retained for backward compatibility. v8 fields default to null.
+     * v7 factory — retained for backward compatibility. v8/v9 fields default to null.
      */
     public static FinalDecision of(String symbol, Instant timestamp,
                                    List<AnalysisResult> agents,
@@ -93,7 +126,7 @@ public record FinalDecision(
                                  agentCount, decisionLatencyMs,
                                  consensusScore, agentWeightSnapshot,
                                  adaptiveAgentWeights, marketRegime, aiReasoning, divergenceFlag,
-                                 null, null, null, null, null);
+                                 null, null, null, null, null, null, null);
     }
 
     /**
@@ -116,12 +149,12 @@ public record FinalDecision(
                                  agentCount, decisionLatencyMs,
                                  consensusScore, agentWeightSnapshot,
                                  adaptiveAgentWeights, marketRegime, aiReasoning, null,
-                                 null, null, null, null, null);
+                                 null, null, null, null, null, null, null);
     }
 
     /**
      * v5 factory — retained for backward compatibility.
-     * v6, v7, v8 fields default to {@code null}.
+     * v6, v7, v8, v9 fields default to {@code null}.
      */
     public static FinalDecision of(String symbol, Instant timestamp,
                                    List<AnalysisResult> agents,
@@ -138,7 +171,7 @@ public record FinalDecision(
                                  agentCount, decisionLatencyMs,
                                  consensusScore, agentWeightSnapshot,
                                  adaptiveAgentWeights, marketRegime, null, null,
-                                 null, null, null, null, null);
+                                 null, null, null, null, null, null, null);
     }
 
     /**
@@ -158,7 +191,7 @@ public record FinalDecision(
                                  metadata, traceId, decisionVersion, orchestratorVersion,
                                  agentCount, decisionLatencyMs,
                                  consensusScore, agentWeightSnapshot, adaptiveAgentWeights,
-                                 null, null, null, null, null, null, null, null);
+                                 null, null, null, null, null, null, null, null, null, null);
     }
 
     /**
@@ -177,7 +210,7 @@ public record FinalDecision(
                                  metadata, traceId, decisionVersion, orchestratorVersion,
                                  agentCount, decisionLatencyMs,
                                  consensusScore, agentWeightSnapshot,
-                                 null, null, null, null, null, null, null, null, null);
+                                 null, null, null, null, null, null, null, null, null, null, null);
     }
 
     /**
@@ -193,7 +226,7 @@ public record FinalDecision(
         return new FinalDecision(symbol, timestamp, agents, finalSignal, confidenceScore,
                                  metadata, traceId, decisionVersion, orchestratorVersion,
                                  agentCount, decisionLatencyMs, 0.0, null,
-                                 null, null, null, null, null, null, null, null, null);
+                                 null, null, null, null, null, null, null, null, null, null, null);
     }
 
     /**
@@ -205,6 +238,6 @@ public record FinalDecision(
                                    Map<String, Object> metadata, String traceId) {
         return new FinalDecision(symbol, timestamp, agents, finalSignal, confidenceScore,
                                  metadata, traceId, null, null, 0, 0L, 0.0, null,
-                                 null, null, null, null, null, null, null, null, null);
+                                 null, null, null, null, null, null, null, null, null, null, null);
     }
 }

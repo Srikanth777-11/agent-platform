@@ -3,6 +3,7 @@ package com.agentplatform.orchestrator.service;
 import com.agentplatform.common.classifier.MarketRegimeClassifier;
 import com.agentplatform.common.cognition.CalmTrajectory;
 import com.agentplatform.common.cognition.CalmTrajectoryInterpreter;
+import com.agentplatform.common.cognition.DirectionalBias;
 import com.agentplatform.common.cognition.DivergenceTrajectory;
 import com.agentplatform.common.cognition.DivergenceTrajectoryInterpreter;
 import com.agentplatform.common.cognition.StabilityPressureCalculator;
@@ -44,6 +45,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 @Service
@@ -129,6 +131,15 @@ public class OrchestratorService {
                                     Map<String, Double> adaptiveWeights =
                                         AgentScoreCalculator.compute(results, perf, feedback, regime[0]);
 
+                                    // ── Phase-33: extract directional bias from TrendAgent metadata ──
+                                    DirectionalBias directionalBias = results.stream()
+                                        .filter(r -> "TrendAgent".equals(r.agentName()))
+                                        .map(r -> r.metadata().get("directionalBias"))
+                                        .filter(Objects::nonNull)
+                                        .map(v -> DirectionalBias.valueOf(String.valueOf(v)))
+                                        .findFirst()
+                                        .orElse(DirectionalBias.NEUTRAL);
+
                                     // ── Assemble DecisionContext (pre-AI snapshot) ──
                                     double latestClose = capturedCtx[0].prices() != null
                                         && !capturedCtx[0].prices().isEmpty()
@@ -136,7 +147,8 @@ public class OrchestratorService {
                                     DecisionContext decisionCtx = DecisionContext.assemble(
                                         event.symbol(), event.triggeredAt(), event.traceId(),
                                         regime[0], results, adaptiveWeights, latestClose)
-                                        .withTradingSession(capturedSession[0]);
+                                        .withTradingSession(capturedSession[0])
+                                        .withDirectionalBias(directionalBias);
 
                                     // ── Phase-18 Calm Omega enrichment (pre-AI, derived cognition) ──
                                     double stabilityPressure = StabilityPressureCalculator.compute(results, adaptiveWeights);
@@ -171,7 +183,8 @@ public class OrchestratorService {
                                             long latencyMs = System.currentTimeMillis() - startTime;
                                             FinalDecision decision = buildDecision(
                                                 event, results, latencyMs, adaptiveWeights,
-                                                regime[0], aiDecision, capturedSession[0], divergenceStreak);
+                                                regime[0], aiDecision, capturedSession[0],
+                                                divergenceStreak, directionalBias);
 
                                             // ── Enrich DecisionContext (post-AI snapshot) ──
                                             String modelLabel = ModelSelector.resolveLabel(regime[0]);
@@ -297,7 +310,8 @@ public class OrchestratorService {
     private FinalDecision buildDecision(MarketDataEvent event, List<AnalysisResult> results,
                                         long latencyMs, Map<String, Double> adaptiveWeights,
                                         MarketRegime regime, AIStrategyDecision aiDecision,
-                                        TradingSession session, int divergenceStreak) {
+                                        TradingSession session, int divergenceStreak,
+                                        DirectionalBias directionalBias) {
         // Consensus runs as safety guardrail — its normalizedConfidence is stored
         // alongside the AI signal for observability and divergence tracking.
         // Passes adaptiveWeights so the guardrail uses historically-informed weights (Path 1).
@@ -327,7 +341,12 @@ public class OrchestratorService {
         metadata.put("agentCount", results.size());
         metadata.put("signalVotes", signalVotes);
 
-        return FinalDecision.of(
+        // Phase-33: resolve tradeDirection from override result (in case override changed signal)
+        String tradeDirection = aiDecision.tradeDirection() != null
+            ? aiDecision.tradeDirection()
+            : com.agentplatform.common.model.TradeDirection.fromSignal(override.finalSignal()).name();
+
+        return FinalDecision.v9(
             event.symbol(),
             event.triggeredAt(),
             results,
@@ -350,7 +369,10 @@ public class OrchestratorService {
             aiDecision.entryPrice(),
             aiDecision.targetPrice(),
             aiDecision.stopLoss(),
-            aiDecision.estimatedHoldMinutes()
+            aiDecision.estimatedHoldMinutes(),
+            // v9 directional bias
+            tradeDirection,
+            directionalBias != null ? directionalBias.name() : null
         );
     }
 

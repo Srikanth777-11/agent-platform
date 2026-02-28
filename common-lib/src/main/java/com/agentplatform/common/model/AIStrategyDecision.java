@@ -27,10 +27,12 @@ public record AIStrategyDecision(
     @JsonProperty("entryPrice")            Double  entryPrice,
     @JsonProperty("targetPrice")           Double  targetPrice,
     @JsonProperty("stopLoss")              Double  stopLoss,
-    @JsonProperty("estimatedHoldMinutes")  Integer estimatedHoldMinutes
+    @JsonProperty("estimatedHoldMinutes")  Integer estimatedHoldMinutes,
+    // Phase-33: explicit trade direction (LONG / SHORT / FLAT)
+    @JsonProperty("tradeDirection")        String  tradeDirection
 ) {
     /** Backwards-compatible constructor for callers that pre-date Phase-23. */
     public AIStrategyDecision(String finalSignal, double confidence, String reasoning) {
-        this(finalSignal, confidence, reasoning, null, null, null, null);
+        this(finalSignal, confidence, reasoning, null, null, null, null, null);
     }
 }

@@ -106,4 +106,12 @@ public class DecisionHistory {
 
     /** False/null = open; true = outcome recorded */
     private Boolean outcomeResolved;
+
+    // ── v9 directional bias fields (additive — nullable for older persisted records) ──
+
+    /** LONG / SHORT / FLAT — unambiguous trade direction */
+    private String tradeDirection;
+
+    /** STRONG_BULLISH / BULLISH / NEUTRAL / BEARISH / STRONG_BEARISH */
+    private String directionalBias;
 }

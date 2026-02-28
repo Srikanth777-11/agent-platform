@@ -1,6 +1,7 @@
 package com.agentplatform.analysis.agent;
 
 import com.agentplatform.analysis.indicator.TechnicalIndicators;
+import com.agentplatform.common.cognition.DirectionalBias;
 import com.agentplatform.common.exception.AgentException;
 import com.agentplatform.common.model.AnalysisResult;
 import com.agentplatform.common.model.Context;
@@ -8,6 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -45,20 +47,78 @@ public class TrendAgent implements AnalysisAgent {
 
         double confidence = computeConfidence(trend, macd, stdDev, currentPrice, sma20);
 
+        // Phase-33: 5-vote directional bias score
+        DirectionalBias bias = computeDirectionalBias(trend, macd, currentPrice, sma20, ema12, prices);
+
         String summary = String.format(
-            "Trend: %s | Price=%.2f | SMA20=%.2f | SMA50=%.2f | MACD=%.4f | StdDev=%.2f → Signal: %s",
-            trend, currentPrice, isNaN(sma20), isNaN(sma50), isNaN(macd), isNaN(stdDev), signal
+            "Trend: %s | Price=%.2f | SMA20=%.2f | SMA50=%.2f | MACD=%.4f | StdDev=%.2f | Bias: %s → Signal: %s",
+            trend, currentPrice, isNaN(sma20), isNaN(sma50), isNaN(macd), isNaN(stdDev), bias.name(), signal
         );
 
-        return AnalysisResult.of(agentName(), summary, signal, confidence, Map.of(
-            "trend",        trend,
-            "currentPrice", currentPrice,
-            "sma20",        Double.isNaN(sma20) ? "N/A" : sma20,
-            "sma50",        Double.isNaN(sma50) ? "N/A" : sma50,
-            "ema12",        Double.isNaN(ema12) ? "N/A" : ema12,
-            "macd",         Double.isNaN(macd) ? "N/A" : macd,
-            "stdDev",       Double.isNaN(stdDev) ? "N/A" : stdDev
-        ));
+        Map<String, Object> metadata = new HashMap<>();
+        metadata.put("trend",          trend);
+        metadata.put("currentPrice",   currentPrice);
+        metadata.put("sma20",          Double.isNaN(sma20) ? "N/A" : sma20);
+        metadata.put("sma50",          Double.isNaN(sma50) ? "N/A" : sma50);
+        metadata.put("ema12",          Double.isNaN(ema12) ? "N/A" : ema12);
+        metadata.put("macd",           Double.isNaN(macd) ? "N/A" : macd);
+        metadata.put("stdDev",         Double.isNaN(stdDev) ? "N/A" : stdDev);
+        metadata.put("directionalBias", bias.name());
+
+        return AnalysisResult.of(agentName(), summary, signal, confidence, metadata);
+    }
+
+    /**
+     * Phase-33: 5-factor directional bias vote (score range −5 to +5).
+     *
+     * <ol>
+     *   <li>Trend direction   : UPTREND=+1, DOWNTREND=−1</li>
+     *   <li>MACD sign         : macd > 0 → +1, macd < 0 → −1</li>
+     *   <li>Price vs SMA20    : price > sma20 → +1, price < sma20 → −1</li>
+     *   <li>Price vs EMA12    : price > ema12 → +1, price < ema12 → −1</li>
+     *   <li>5-candle momentum : prices[0] > prices[4] → +1, else → −1</li>
+     * </ol>
+     */
+    private DirectionalBias computeDirectionalBias(String trend, double macd, double price,
+                                                    double sma20, double ema12,
+                                                    List<Double> prices) {
+        int score = 0;
+
+        // Vote 1: trend
+        if ("UPTREND".equals(trend))        score++;
+        else if ("DOWNTREND".equals(trend)) score--;
+
+        // Vote 2: MACD sign
+        if (!Double.isNaN(macd)) {
+            if (macd > 0) score++;
+            else if (macd < 0) score--;
+        }
+
+        // Vote 3: price vs SMA20
+        if (!Double.isNaN(sma20) && sma20 > 0) {
+            if (price > sma20) score++;
+            else if (price < sma20) score--;
+        }
+
+        // Vote 4: price vs EMA12
+        if (!Double.isNaN(ema12) && ema12 > 0) {
+            if (price > ema12) score++;
+            else if (price < ema12) score--;
+        }
+
+        // Vote 5: 5-candle momentum (prices[0] = most recent, prices[4] = 4 candles ago)
+        if (prices.size() >= 5) {
+            double priceNow  = prices.get(0);
+            double pricePrev = prices.get(4);
+            if (priceNow > pricePrev) score++;
+            else if (priceNow < pricePrev) score--;
+        }
+
+        if      (score >= 3)  return DirectionalBias.STRONG_BULLISH;
+        else if (score >= 1)  return DirectionalBias.BULLISH;
+        else if (score == 0)  return DirectionalBias.NEUTRAL;
+        else if (score >= -2) return DirectionalBias.BEARISH;
+        else                  return DirectionalBias.STRONG_BEARISH;
     }
 
     private double computeConfidence(String trend, double macd, double stdDev,

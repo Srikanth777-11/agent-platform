@@ -36,6 +36,20 @@ const REGIME_ANIMATION_CLASS = {
   TRENDING: 'regime-trending',
 };
 
+const DIRECTION_STYLES = {
+  LONG:  { label: '\u2191 LONG',  color: 'text-emerald-400', bg: 'bg-emerald-400/10', border: 'border-emerald-400/20' },
+  SHORT: { label: '\u2193 SHORT', color: 'text-rose-400',    bg: 'bg-rose-400/10',    border: 'border-rose-400/20'    },
+  FLAT:  { label: '\u2014 FLAT',  color: 'text-slate-400',   bg: 'bg-slate-400/10',   border: 'border-slate-400/20'   },
+};
+
+const BIAS_STYLES = {
+  STRONG_BULLISH: { label: 'Strong Bullish Bias', color: 'text-emerald-400' },
+  BULLISH:        { label: 'Bullish Bias',         color: 'text-emerald-300' },
+  NEUTRAL:        { label: 'Neutral Bias',         color: 'text-slate-400'   },
+  BEARISH:        { label: 'Bearish Bias',         color: 'text-rose-300'    },
+  STRONG_BEARISH: { label: 'Strong Bearish Bias',  color: 'text-rose-400'    },
+};
+
 export default function SnapshotCard({ data, onClick }) {
   const {
     symbol,
@@ -50,6 +64,8 @@ export default function SnapshotCard({ data, onClick }) {
     targetPrice,
     stopLoss,
     estimatedHoldMinutes,
+    tradeDirection,
+    directionalBias,
   } = data;
 
   const signal = SIGNAL_STYLES[finalSignal] || SIGNAL_STYLES.HOLD;
@@ -118,6 +134,9 @@ export default function SnapshotCard({ data, onClick }) {
           <span className={`text-3xl font-bold tracking-tight ${signal.color}`}>
             {finalSignal}
           </span>
+          {tradeDirection && (
+            <DirectionBadge direction={tradeDirection} />
+          )}
           {divergenceFlag && (
             <motion.span
               initial={{ scale: 0 }}
@@ -129,6 +148,12 @@ export default function SnapshotCard({ data, onClick }) {
             </motion.span>
           )}
         </div>
+        {/* ── Directional Bias label ────────────────────────── */}
+        {directionalBias && (
+          <p className={`text-[10px] font-semibold uppercase tracking-wider mb-1 ${BIAS_STYLES[directionalBias]?.color || 'text-slate-500'}`}>
+            {BIAS_STYLES[directionalBias]?.label || directionalBias}
+          </p>
+        )}
 
         {/* ── Regime Insight Line ───────────────────────────── */}
         <p className={`text-[11px] mb-1 ${regime.color} opacity-70`}>
@@ -271,6 +296,15 @@ function PriceChip({ label, value, color }) {
         {value.toFixed(2)}
       </span>
     </div>
+  );
+}
+
+function DirectionBadge({ direction }) {
+  const cfg = DIRECTION_STYLES[direction] || DIRECTION_STYLES.FLAT;
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold font-mono border ${cfg.color} ${cfg.bg} ${cfg.border}`}>
+      {cfg.label}
+    </span>
   );
 }
 

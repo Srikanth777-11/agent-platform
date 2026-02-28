@@ -2,9 +2,11 @@ package com.agentplatform.orchestrator.ai;
 
 import com.agentplatform.common.cognition.CalmMood;
 import com.agentplatform.common.cognition.CalmTrajectory;
+import com.agentplatform.common.cognition.DirectionalBias;
 import com.agentplatform.common.cognition.ReflectionState;
 import com.agentplatform.common.cognition.TradingSession;
 import com.agentplatform.common.model.AIStrategyDecision;
+import com.agentplatform.common.model.TradeDirection;
 import com.agentplatform.common.model.AnalysisResult;
 import com.agentplatform.common.model.Context;
 import com.agentplatform.common.model.DecisionContext;
@@ -279,6 +281,28 @@ public class AIStrategistService {
             };
         }
 
+        // Phase-33: Directional Bias section — from TrendAgent 5-vote score
+        String biasSection = "";
+        if (omegaCtx != null && omegaCtx.directionalBias() != null) {
+            DirectionalBias bias = omegaCtx.directionalBias();
+            String biasRule = switch (bias) {
+                case STRONG_BULLISH -> "Only signal BUY. Do NOT signal SELL in a strongly bullish market.";
+                case BULLISH        -> "Prefer BUY when agent signals support it. Avoid SELL.";
+                case NEUTRAL        -> "Prefer WATCH (choppy market — avoid new entry). BUY or SELL only with strong agent consensus.";
+                case BEARISH        -> "Prefer SELL when agent signals support it. Avoid BUY.";
+                case STRONG_BEARISH -> "Only signal SELL. Do NOT signal BUY in a strongly bearish market.";
+            };
+            biasSection = String.format("""
+
+            Directional Bias (TrendAgent 5-factor vote):
+              Bias   : %s
+              Rule   : %s
+              Constraint : Never signal BUY in a BEARISH/STRONG_BEARISH market.
+                           Never signal SELL in a BULLISH/STRONG_BULLISH market.
+                           NEUTRAL bias → prefer WATCH to avoid choppy-market losses.
+            """, bias.name(), biasRule);
+        }
+
         String memorySection = buildMemorySection(priorDecisions);
 
         return """
@@ -290,20 +314,27 @@ public class AIStrategistService {
             Latest Close:  %.4f
 
             Agent Signals (with history-adjusted adaptive weights):
-            %s%s%s%s%s%s
-            Based on the market regime, the weighted agent signals, and risk discipline, \
-            provide your strategic recommendation.
+            %s%s%s%s%s%s%s
+            Based on the market regime, the weighted agent signals, directional bias, \
+            and risk discipline, provide your strategic recommendation.
 
             %s
+
+            Trade Direction Clarification:
+              BUY  = ENTER LONG  (buy Nifty futures or CE options)
+              SELL = ENTER SHORT (sell Nifty futures or buy PE options)
+              HOLD/WATCH = no new position (FLAT)
 
             Respond ONLY with a JSON object in this exact format:
             {
               "finalSignal": "BUY|SELL|HOLD|WATCH",
               "confidence": 0.0-1.0,
-              "reasoning": "your rationale here"%s
+              "reasoning": "your rationale here",
+              "tradeDirection": "LONG|SHORT|FLAT"%s
             }
             """.formatted(context.symbol(), regime.name(), latestClose, agentSummary,
-                          omegaSection, reflectionSection, moodSection, sessionSection, memorySection,
+                          omegaSection, reflectionSection, moodSection, sessionSection,
+                          biasSection, memorySection,
                           reasoningInstruction,
                           activeScalpingWindow
                               ? ",\n              \"entryPrice\": <recommended entry price for BUY/SELL, null for HOLD/WATCH>,\n              \"targetPrice\": <take-profit price — typically 0.3–0.5% move, null for HOLD/WATCH>,\n              \"stopLoss\": <hard stop price — typically 0.15–0.25% against entry, null for HOLD/WATCH>,\n              \"estimatedHoldMinutes\": <expected scalp duration 1–15 min, null for HOLD/WATCH>"
@@ -378,8 +409,13 @@ public class AIStrategistService {
             Integer holdMin     = json.hasNonNull("estimatedHoldMinutes")
                                   ? json.path("estimatedHoldMinutes").asInt() : null;
 
+            // Phase-33: trade direction — fallback to signal-derived if absent
+            String tradeDirection = json.hasNonNull("tradeDirection")
+                ? json.path("tradeDirection").asText()
+                : TradeDirection.fromSignal(signal).name();
+
             return new AIStrategyDecision(signal, confidence, reasoning,
-                                          entryPrice, targetPrice, stopLoss, holdMin);
+                                          entryPrice, targetPrice, stopLoss, holdMin, tradeDirection);
         } catch (Exception e) {
             log.error("[AIStrategist] Failed to parse response: {}", responseText, e);
             return new AIStrategyDecision("HOLD", 0.5, "Parse error — defaulting to HOLD");
@@ -412,8 +448,10 @@ public class AIStrategistService {
 
         // Phase-23: synthetic entry/exit for BUY/SELL fallback
         // (latestClose not available in fallback context — use null; orchestrator will skip)
+        // Phase-33: derive tradeDirection from fallback signal
+        String tradeDirection = TradeDirection.fromSignal(topSignal).name();
         return new AIStrategyDecision(topSignal, avgConfidence,
             "Fallback: majority vote from agent signals — API unavailable",
-            null, null, null, null);
+            null, null, null, null, tradeDirection);
     }
 }
