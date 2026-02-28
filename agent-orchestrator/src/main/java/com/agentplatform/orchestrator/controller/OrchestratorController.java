@@ -20,8 +20,11 @@ public class OrchestratorController {
     }
 
     @PostMapping("/trigger")
-    public Mono<ResponseEntity<List<AnalysisResult>>> trigger(@RequestBody MarketDataEvent event) {
-        return orchestratorService.orchestrate(event).map(ResponseEntity::ok);
+    public Mono<ResponseEntity<List<AnalysisResult>>> trigger(
+            @RequestBody MarketDataEvent event,
+            @RequestHeader(value = "X-Replay-Mode", defaultValue = "false") String replayModeHeader) {
+        boolean replayMode = "true".equalsIgnoreCase(replayModeHeader);
+        return orchestratorService.orchestrate(event, replayMode).map(ResponseEntity::ok);
     }
 
     @GetMapping("/health")

@@ -5,6 +5,7 @@ import com.agentplatform.common.model.AnalysisResult;
 import com.agentplatform.common.model.Context;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.RequestHeader;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
@@ -20,8 +21,11 @@ public class AnalysisController {
     }
 
     @PostMapping
-    public Mono<ResponseEntity<List<AnalysisResult>>> analyze(@RequestBody Context context) {
-        return dispatchService.dispatchAll(context)
+    public Mono<ResponseEntity<List<AnalysisResult>>> analyze(
+            @RequestBody Context context,
+            @RequestHeader(value = "X-Replay-Mode", defaultValue = "false") String replayModeHeader) {
+        boolean replayMode = "true".equalsIgnoreCase(replayModeHeader);
+        return dispatchService.dispatchAll(context, replayMode)
             .map(ResponseEntity::ok);
     }
 

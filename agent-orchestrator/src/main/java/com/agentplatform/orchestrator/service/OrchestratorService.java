@@ -91,7 +91,7 @@ public class OrchestratorService {
         this.aiStrategistService      = aiStrategistService;
     }
 
-    public Mono<List<AnalysisResult>> orchestrate(MarketDataEvent event) {
+    public Mono<List<AnalysisResult>> orchestrate(MarketDataEvent event, boolean replayMode) {
         return Mono.defer(() -> {
             final long startTime = System.currentTimeMillis();
             MDC.put("traceId", event.traceId());
@@ -118,7 +118,7 @@ public class OrchestratorService {
                     resolveOpenOutcomes(event.symbol(), ctx);
                 })
                 .doOnEach(decisionFlowLogger.stage(DecisionFlowLogger.MARKET_DATA_FETCHED))
-                .flatMap(this::callAnalysisEngine)
+                .flatMap(ctx -> callAnalysisEngine(ctx, replayMode))
                 .doOnEach(decisionFlowLogger.stage(DecisionFlowLogger.AGENTS_COMPLETED))
                 // Fetch adaptive weights → fetch feedback → evaluate AI strategy → build FinalDecision.
                 // The chain stays fully non-blocking: each flatMap composes reactive sources.
@@ -169,14 +169,29 @@ public class OrchestratorService {
                                         reflection.reflectionState(), reflection.calmMood(),
                                         reflection.reflectionPersistence(), event.traceId());
 
-                                    // AI Strategist Layer — primary intelligence evaluation.
-                                    // Phase-27: fetch last 3 decisions as strategy memory (non-blocking, best-effort).
-                                    return fetchStrategyMemory(event.symbol())
-                                        .flatMap(memory -> {
-                                            final int divergenceStreak = computeDivergenceStreak(memory);
-                                            return aiStrategistService
-                                                .evaluate(reflectedCtx, capturedCtx[0], memory)
-                                                .map(aiDecision -> {
+                                    // AI Strategist Layer — skipped in replay mode (consensus-only).
+                                    // Phase-34: replay uses consensus signal directly to avoid AI latency.
+                                    Mono<AIStrategyDecision> aiMono;
+                                    if (replayMode) {
+                                        ConsensusResult quickConsensus = ConsensusIntegrationGuard.resolve(
+                                            results, consensusEngine, adaptiveWeights);
+                                        aiMono = Mono.just(new AIStrategyDecision(
+                                            quickConsensus.finalSignal(),
+                                            quickConsensus.normalizedConfidence(),
+                                            "REPLAY_CONSENSUS_ONLY",
+                                            null, null, null, null,
+                                            com.agentplatform.common.model.TradeDirection
+                                                .fromSignal(quickConsensus.finalSignal()).name()
+                                        ));
+                                    } else {
+                                        // Phase-27: fetch last 3 decisions as strategy memory (non-blocking, best-effort).
+                                        aiMono = fetchStrategyMemory(event.symbol())
+                                            .flatMap(memory -> aiStrategistService.evaluate(reflectedCtx, capturedCtx[0], memory));
+                                    }
+                                    final int divergenceStreak = replayMode ? 0
+                                        : computeDivergenceStreak(List.of());
+                                    return aiMono
+                                        .map(aiDecision -> {
                                             decisionFlowLogger.logWithTraceId(
                                                 DecisionFlowLogger.AI_STRATEGY_EVALUATED, event.traceId());
 
@@ -184,7 +199,7 @@ public class OrchestratorService {
                                             FinalDecision decision = buildDecision(
                                                 event, results, latencyMs, adaptiveWeights,
                                                 regime[0], aiDecision, capturedSession[0],
-                                                divergenceStreak, directionalBias);
+                                                divergenceStreak, directionalBias, replayMode);
 
                                             // ── Enrich DecisionContext (post-AI snapshot) ──
                                             String modelLabel = ModelSelector.resolveLabel(regime[0]);
@@ -212,7 +227,6 @@ public class OrchestratorService {
                                                 DecisionFlowLogger.EVENTS_DISPATCHED, decision.traceId());
                                             return decision.agents();
                                         });  // closes .map(aiDecision -> {
-                                        }); // closes .flatMap(memory -> {
                                 }));
                 })
                 .doOnError(e -> log.error("Orchestration failed for symbol={}", event.symbol(), e))
@@ -255,10 +269,11 @@ public class OrchestratorService {
             });
     }
 
-    private Mono<List<AnalysisResult>> callAnalysisEngine(Context context) {
+    private Mono<List<AnalysisResult>> callAnalysisEngine(Context context, boolean replayMode) {
         return analysisEngineClient.post()
             .uri("/api/v1/analyze")
             .header("X-Trace-Id", context.traceId())
+            .header("X-Replay-Mode", String.valueOf(replayMode))
             .bodyValue(context)
             .retrieve()
             .bodyToMono(new ParameterizedTypeReference<List<AnalysisResult>>() {});
@@ -311,7 +326,7 @@ public class OrchestratorService {
                                         long latencyMs, Map<String, Double> adaptiveWeights,
                                         MarketRegime regime, AIStrategyDecision aiDecision,
                                         TradingSession session, int divergenceStreak,
-                                        DirectionalBias directionalBias) {
+                                        DirectionalBias directionalBias, boolean replayMode) {
         // Consensus runs as safety guardrail — its normalizedConfidence is stored
         // alongside the AI signal for observability and divergence tracking.
         // Passes adaptiveWeights so the guardrail uses historically-informed weights (Path 1).
@@ -330,8 +345,88 @@ public class OrchestratorService {
             log.info("[DivergenceGuard] Override applied. reason={} traceId={}", override.reason(), event.traceId());
         }
 
-        String finalReasoning = override.overrideApplied()
-            ? aiDecision.reasoning() + " [OVERRIDE: " + override.reason() + "]"
+        // ── Phase-35 Gate 1: Authority Chain — AI can only be overridden DOWNWARD (to WATCH/HOLD) ──
+        String workingSignal     = override.finalSignal();
+        double workingConfidence = override.confidence();
+        boolean overrideKept     = override.overrideApplied();
+        String  overrideReason   = override.reason();
+
+        boolean overrideIsPassive = "WATCH".equals(workingSignal) || "HOLD".equals(workingSignal);
+        if (overrideKept && !overrideIsPassive) {
+            log.info("[Phase35-AuthorityChain] Blocked upward override. consensus={} keeping ai={} traceId={}",
+                workingSignal, aiDecision.finalSignal(), event.traceId());
+            workingSignal     = aiDecision.finalSignal();
+            workingConfidence = aiDecision.confidence();
+            overrideKept      = false;
+            overrideReason    = null;
+        }
+
+        // ── Phase-35 Gate 2: Session gate — MIDDAY_CONSOLIDATION / OFF_HOURS → force WATCH ──
+        if (session == TradingSession.MIDDAY_CONSOLIDATION || session == TradingSession.OFF_HOURS) {
+            if ("BUY".equals(workingSignal) || "SELL".equals(workingSignal)) {
+                log.info("[Phase35-SessionGate] {} forced WATCH. session={} traceId={}",
+                    workingSignal, session, event.traceId());
+                workingSignal = "WATCH";
+            }
+        }
+
+        // ── Phase-35 Gate 3: Directional bias gate ──
+        if ("BUY".equals(workingSignal) &&
+                (directionalBias == DirectionalBias.BEARISH || directionalBias == DirectionalBias.STRONG_BEARISH)) {
+            log.info("[Phase35-BiasGate] BUY blocked in {} market. traceId={}", directionalBias, event.traceId());
+            workingSignal = "WATCH";
+        }
+        if ("SELL".equals(workingSignal) &&
+                (directionalBias == DirectionalBias.BULLISH || directionalBias == DirectionalBias.STRONG_BULLISH)) {
+            log.info("[Phase35-BiasGate] SELL blocked in {} market. traceId={}", directionalBias, event.traceId());
+            workingSignal = "WATCH";
+        }
+
+        // ── Phase-35 Gate 4: Divergence penalty ──
+        if (divergenceFlag) {
+            workingConfidence *= 0.85;
+        }
+        if (divergenceStreak >= 2) {
+            log.info("[Phase35-DivergencePenalty] streak={} forced WATCH. traceId={}", divergenceStreak, event.traceId());
+            workingSignal = "WATCH";
+        }
+
+        // ── Phase-35 Gate 5: Multi-filter — BUY/SELL only if all conditions met ──
+        boolean sessionActive = session == TradingSession.OPENING_BURST || session == TradingSession.POWER_HOUR;
+        if (("BUY".equals(workingSignal) || "SELL".equals(workingSignal))
+                && (workingConfidence < 0.65 || divergenceFlag || !sessionActive)) {
+            log.info("[Phase35-MultiFilter] Filtered to WATCH. confidence={} divergence={} session={} traceId={}",
+                String.format("%.3f", workingConfidence), divergenceFlag, session, event.traceId());
+            workingSignal = "WATCH";
+        }
+
+        // ── Phase-36: TradeEligibilityGuard — hard eligibility gate (BUY/SELL must pass ALL conditions) ──
+        if ("BUY".equals(workingSignal)) {
+            boolean buyEligible = (session == TradingSession.OPENING_BURST || session == TradingSession.POWER_HOUR)
+                && (regime == MarketRegime.VOLATILE || regime == MarketRegime.TRENDING)
+                && (directionalBias == DirectionalBias.BULLISH || directionalBias == DirectionalBias.STRONG_BULLISH)
+                && workingConfidence >= 0.65
+                && !divergenceFlag;
+            if (!buyEligible) {
+                log.info("[Phase36-EligibilityGuard] BUY blocked. session={} regime={} bias={} confidence={} divergence={} traceId={}",
+                    session, regime, directionalBias, String.format("%.3f", workingConfidence), divergenceFlag, event.traceId());
+                workingSignal = "WATCH";
+            }
+        } else if ("SELL".equals(workingSignal)) {
+            boolean sellEligible = session == TradingSession.OPENING_BURST
+                && regime == MarketRegime.VOLATILE
+                && (directionalBias == DirectionalBias.BEARISH || directionalBias == DirectionalBias.STRONG_BEARISH)
+                && workingConfidence >= 0.65
+                && !divergenceFlag;
+            if (!sellEligible) {
+                log.info("[Phase36-EligibilityGuard] SELL blocked. session={} regime={} bias={} confidence={} divergence={} traceId={}",
+                    session, regime, directionalBias, String.format("%.3f", workingConfidence), divergenceFlag, event.traceId());
+                workingSignal = "WATCH";
+            }
+        }
+
+        String finalReasoning = overrideKept
+            ? aiDecision.reasoning() + " [OVERRIDE: " + overrideReason + "]"
             : aiDecision.reasoning();
 
         Map<String, Long> signalVotes = results.stream()
@@ -340,18 +435,17 @@ public class OrchestratorService {
         Map<String, Object> metadata = new HashMap<>();
         metadata.put("agentCount", results.size());
         metadata.put("signalVotes", signalVotes);
+        metadata.put("decision_mode", replayMode ? "REPLAY_CONSENSUS_ONLY" : "LIVE_AI");
 
-        // Phase-33: resolve tradeDirection from override result (in case override changed signal)
-        String tradeDirection = aiDecision.tradeDirection() != null
-            ? aiDecision.tradeDirection()
-            : com.agentplatform.common.model.TradeDirection.fromSignal(override.finalSignal()).name();
+        // Phase-33: resolve tradeDirection from final working signal
+        String tradeDirection = com.agentplatform.common.model.TradeDirection.fromSignal(workingSignal).name();
 
         return FinalDecision.v9(
             event.symbol(),
             event.triggeredAt(),
             results,
-            override.finalSignal(),            // AI signal — or consensus if override fired
-            override.confidence(),             // AI confidence — or dampened/replaced
+            workingSignal,                     // Phase-35 gated final signal
+            workingConfidence,                 // Phase-35 adjusted confidence
             metadata,
             event.traceId(),
             DECISION_VERSION,
@@ -362,7 +456,7 @@ public class OrchestratorService {
             consensus.agentWeights(),
             adaptiveWeights,
             regime,
-            finalReasoning,                    // v6 AI reasoning — appended with override note if fired
+            finalReasoning,
             divergenceFlag,                    // v7 divergence awareness (pre-override, raw AI vs consensus)
             // v8 scalping intelligence
             session != null ? session.name() : null,

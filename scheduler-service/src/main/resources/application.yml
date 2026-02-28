@@ -10,6 +10,8 @@ services:
     base-url: ${ORCHESTRATOR_URL:http://localhost:8081}
   history:
     base-url: ${HISTORY_URL:http://localhost:8085}
+  market-data:
+    base-url: ${MARKET_DATA_URL:http://localhost:8080}
 
 scheduler:
   symbols: ${WATCHED_SYMBOLS:IBM,AAPL}

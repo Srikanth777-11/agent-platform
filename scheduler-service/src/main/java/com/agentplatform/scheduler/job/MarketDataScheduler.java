@@ -9,6 +9,7 @@ import com.agentplatform.scheduler.strategy.AdaptiveTempoStrategy;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -44,13 +45,17 @@ public class MarketDataScheduler {
     private static final Logger log = LoggerFactory.getLogger(MarketDataScheduler.class);
 
     private final WebClient orchestratorClient;
+    private final WebClient marketDataClient;
     private final HistoryClient historyClient;
 
     @Value("${scheduler.symbols:IBM,AAPL,GOOGL}")
     private String symbolsConfig;
 
-    public MarketDataScheduler(WebClient orchestratorClient, HistoryClient historyClient) {
+    public MarketDataScheduler(@Qualifier("orchestratorClient") WebClient orchestratorClient,
+                               @Qualifier("marketDataClient") WebClient marketDataClient,
+                               HistoryClient historyClient) {
         this.orchestratorClient = orchestratorClient;
+        this.marketDataClient   = marketDataClient;
         this.historyClient      = historyClient;
     }
 
@@ -84,7 +89,14 @@ public class MarketDataScheduler {
      */
     private void scheduleNextCycle(String symbol, Duration delay) {
         Mono.delay(delay)
-            .then(triggerOrchestration(symbol))
+            .flatMap(t -> isReplayRunning())
+            .flatMap(replayRunning -> {
+                if (replayRunning) {
+                    log.info("Replay active — skipping live trigger. symbol={}", symbol);
+                    return Mono.empty();
+                }
+                return triggerOrchestration(symbol);
+            })
             .then(historyClient.fetchLatestRegime(symbol))
             .subscribe(
                 regime -> {
@@ -101,6 +113,21 @@ public class MarketDataScheduler {
                     scheduleNextCycle(symbol, AdaptiveTempoStrategy.FALLBACK_INTERVAL);
                 }
             );
+    }
+
+    // ── replay status check ────────────────────────────────────────────────────
+
+    /**
+     * Returns true if historical replay is currently RUNNING in market-data-service.
+     * If the check fails (service unreachable), defaults to false so scheduling continues.
+     */
+    private Mono<Boolean> isReplayRunning() {
+        return marketDataClient.get()
+            .uri("/api/v1/market-data/replay/status")
+            .retrieve()
+            .bodyToMono(String.class)
+            .map(body -> body.contains("\"status\":\"RUNNING\""))
+            .onErrorReturn(false);
     }
 
     // ── orchestrator trigger (fire-and-continue) ──────────────────────────────

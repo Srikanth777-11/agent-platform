@@ -23,9 +23,12 @@ public class AgentDispatchService {
         this.agents = agents;
     }
 
-    public Mono<List<AnalysisResult>> dispatchAll(Context context) {
-        log.info("Dispatching {} agents in parallel for symbol={}", agents.size(), context.symbol());
-        return Flux.fromIterable(agents)
+    public Mono<List<AnalysisResult>> dispatchAll(Context context, boolean replayMode) {
+        List<AnalysisAgent> activeAgents = replayMode
+            ? agents.stream().filter(a -> !"DisciplineCoach".equals(a.agentName())).toList()
+            : agents;
+        log.info("Dispatching {} agents in parallel for symbol={} replayMode={}", activeAgents.size(), context.symbol(), replayMode);
+        return Flux.fromIterable(activeAgents)
             .flatMap(agent -> Mono.fromCallable(() -> agent.analyze(context))
                 .subscribeOn(Schedulers.boundedElastic())
                 .doOnSuccess(result -> log.info("Agent={} complete. signal={} confidence={}",

@@ -42,6 +42,7 @@ public class HistoryService {
     private final DecisionHistoryRepository repository;
     private final AgentPerformanceSnapshotRepository snapshotRepository;
     private final DecisionMetricsProjectionRepository metricsRepository;
+    private final WinConditionRegistryService winConditionRegistry;
     private final ObjectMapper objectMapper;
     private final Sinks.Many<SnapshotDecisionDTO> snapshotSink =
         Sinks.many().multicast().onBackpressureBuffer(64);
@@ -49,11 +50,13 @@ public class HistoryService {
     public HistoryService(DecisionHistoryRepository repository,
                           AgentPerformanceSnapshotRepository snapshotRepository,
                           DecisionMetricsProjectionRepository metricsRepository,
+                          WinConditionRegistryService winConditionRegistry,
                           ObjectMapper objectMapper) {
-        this.repository         = repository;
-        this.snapshotRepository = snapshotRepository;
-        this.metricsRepository  = metricsRepository;
-        this.objectMapper       = objectMapper;
+        this.repository             = repository;
+        this.snapshotRepository     = snapshotRepository;
+        this.metricsRepository      = metricsRepository;
+        this.winConditionRegistry   = winConditionRegistry;
+        this.objectMapper           = objectMapper;
     }
 
     public Mono<DecisionHistory> save(FinalDecision decision) {
@@ -218,6 +221,13 @@ public class HistoryService {
             // v9 directional bias — null-safe for legacy FinalDecision instances
             entity.setTradeDirection(decision.tradeDirection());
             entity.setDirectionalBias(decision.directionalBias());
+            // v10 decision mode — extracted from metadata (Phase-34)
+            if (decision.metadata() != null) {
+                Object mode = decision.metadata().get("decision_mode");
+                entity.setDecisionMode(mode != null ? String.valueOf(mode) : "LIVE_AI");
+            } else {
+                entity.setDecisionMode("LIVE_AI");
+            }
             return entity;
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize FinalDecision for persistence", e);
@@ -824,7 +834,9 @@ public class HistoryService {
                         String.format("%.2f", finalOutcome), holdMin))
                     // ── Real P&L learning loop: re-score agents by actual outcome ──────
                     .flatMap(saved -> rescoreAgentsByOutcome(
-                        agentsJson, finalSignal, finalOutcome, decisionLatency));
+                        agentsJson, finalSignal, finalOutcome, decisionLatency)
+                        // ── Phase-38a: WinConditionRegistry — passive data collection ──
+                        .then(winConditionRegistry.record(saved)));
             })
             .then();
     }

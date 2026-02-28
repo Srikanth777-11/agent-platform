@@ -2,6 +2,7 @@ package com.agentplatform.scheduler.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -16,9 +17,22 @@ public class SchedulerConfig {
     @Value("${services.history.base-url}")
     private String historyUrl;
 
-    @Bean
+    @Value("${services.market-data.base-url}")
+    private String marketDataUrl;
+
+    @Bean("orchestratorClient")
     public WebClient orchestratorClient(WebClient.Builder builder) {
         return builder.baseUrl(orchestratorUrl).build();
+    }
+
+    @Bean("marketDataClient")
+    public WebClient marketDataClient(WebClient.Builder builder) {
+        return builder.baseUrl(marketDataUrl).build();
+    }
+
+    @Bean("historyWebClient")
+    public WebClient historyWebClient(WebClient.Builder builder) {
+        return builder.baseUrl(historyUrl).build();
     }
 
     /*@Bean

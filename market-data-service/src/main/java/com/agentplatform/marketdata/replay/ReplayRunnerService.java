@@ -45,7 +45,7 @@ public class ReplayRunnerService {
     private static final Logger log = LoggerFactory.getLogger(ReplayRunnerService.class);
 
     /** Milliseconds to wait after each trigger before fetching the decision. */
-    private static final long PIPELINE_SETTLE_MS = 1_500;
+    private static final long PIPELINE_SETTLE_MS = 500;
 
     private final HistoricalReplayProvider provider;
     private final MarketDataWebClient      marketDataWebClient;
@@ -199,6 +199,7 @@ public class ReplayRunnerService {
                 orchestratorClient.post()
                     .uri("/api/v1/orchestrate/trigger")
                     .contentType(MediaType.APPLICATION_JSON)
+                    .header("X-Replay-Mode", "true")
                     .bodyValue(event)
                     .retrieve()
                     .bodyToMono(String.class)  // orchestrator returns List<AnalysisResult> JSON

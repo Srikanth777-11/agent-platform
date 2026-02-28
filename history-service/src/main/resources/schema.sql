@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS decision_history (
     outcome_resolved       BOOLEAN,
     -- v9 directional bias fields (additive — nullable for backward compatibility)
     trade_direction        VARCHAR(10),
-    directional_bias       VARCHAR(20)
+    directional_bias       VARCHAR(20),
+    -- v10 decision mode: LIVE_AI | REPLAY_CONSENSUS_ONLY (used to filter registry training)
+    decision_mode          VARCHAR(30)
 );
 
 -- v8 projection tables & index optimization
@@ -84,6 +86,23 @@ CREATE TABLE IF NOT EXISTS replay_candles (
     UNIQUE (symbol, candle_time)
 );
 CREATE INDEX IF NOT EXISTS idx_replay_candles_symbol_time ON replay_candles (symbol, candle_time ASC);
+
+-- Phase-38a: WinConditionRegistry — passive statistical learning layer
+-- Records win/loss counts per (session, regime, bias, signal) combination.
+-- Only LIVE_AI decisions populate this table (REPLAY_CONSENSUS_ONLY excluded).
+CREATE TABLE IF NOT EXISTS edge_conditions (
+    id               BIGSERIAL PRIMARY KEY,
+    trading_session  VARCHAR(30)  NOT NULL,
+    market_regime    VARCHAR(20)  NOT NULL,
+    directional_bias VARCHAR(20)  NOT NULL,
+    signal           VARCHAR(10)  NOT NULL,
+    win_count        INTEGER      NOT NULL DEFAULT 0,
+    loss_count       INTEGER      NOT NULL DEFAULT 0,
+    total_count      INTEGER      NOT NULL DEFAULT 0,
+    win_rate         DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    last_updated     TIMESTAMP    NOT NULL DEFAULT NOW(),
+    UNIQUE (trading_session, market_regime, directional_bias, signal)
+);
 
 -- Operator trade awareness (no pipeline linkage)
 CREATE TABLE IF NOT EXISTS trade_sessions (

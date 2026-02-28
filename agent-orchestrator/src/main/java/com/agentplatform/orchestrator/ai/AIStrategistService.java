@@ -266,7 +266,8 @@ public class AIStrategistService {
                 + " — " + moodInstruction + "\n";
         }
 
-        // Phase-22 Trading Session — controls whether BUY/SELL signals are appropriate
+        // Phase-22 Trading Session — informational only. Gate enforcement is handled by
+        // Phase-35 SessionGate and Phase-36 EligibilityGuard in OrchestratorService.
         boolean activeScalpingWindow = omegaCtx != null
             && omegaCtx.tradingSession() != null
             && omegaCtx.tradingSession().isActiveScalpingWindow();
@@ -274,32 +275,33 @@ public class AIStrategistService {
         String sessionSection = "";
         if (omegaCtx != null && omegaCtx.tradingSession() != null) {
             sessionSection = switch (omegaCtx.tradingSession()) {
-                case OPENING_BURST        -> "\nTrading Session: OPENING BURST (09:30–10:30 ET) — Active scalping window. BUY/SELL signals are appropriate when agent consensus supports them.\n";
-                case POWER_HOUR           -> "\nTrading Session: POWER HOUR (14:45–16:00 ET) — Active scalping window. BUY/SELL signals are appropriate when agent consensus supports them.\n";
-                case MIDDAY_CONSOLIDATION -> "\nTrading Session: MIDDAY DEAD ZONE (10:30–14:45 ET) — Choppy, low-momentum period. Respond WATCH or HOLD only. Do NOT generate BUY or SELL signals.\n";
-                case OFF_HOURS            -> "\nTrading Session: OFF HOURS — Market is closed. Respond HOLD only.\n";
+                case OPENING_BURST        -> "\nTrading Session: OPENING BURST — Active scalping window. BUY and SELL signals are both valid when directional bias supports them.\n";
+                case POWER_HOUR           -> "\nTrading Session: POWER HOUR — Active scalping window. BUY and SELL signals are both valid when directional bias supports them.\n";
+                case MIDDAY_CONSOLIDATION -> "\nTrading Session: MIDDAY CONSOLIDATION — Lower momentum period. Prefer WATCH unless agent signals are strongly aligned.\n";
+                case OFF_HOURS            -> "\nTrading Session: OFF HOURS — Outside active market hours. Prefer WATCH or HOLD.\n";
             };
         }
 
-        // Phase-33: Directional Bias section — from TrendAgent 5-vote score
+        // Phase-33/37: Directional Bias section — from TrendAgent 5-vote score.
+        // Phase-37: SELL in BEARISH markets is equally valid as BUY in BULLISH markets.
         String biasSection = "";
         if (omegaCtx != null && omegaCtx.directionalBias() != null) {
             DirectionalBias bias = omegaCtx.directionalBias();
             String biasRule = switch (bias) {
-                case STRONG_BULLISH -> "Only signal BUY. Do NOT signal SELL in a strongly bullish market.";
-                case BULLISH        -> "Prefer BUY when agent signals support it. Avoid SELL.";
+                case STRONG_BULLISH -> "Signal BUY. The market is strongly bullish. SELL is incorrect in this direction.";
+                case BULLISH        -> "Signal BUY when agent signals support it. The market is trending up. SELL is incorrect in this direction.";
                 case NEUTRAL        -> "Prefer WATCH (choppy market — avoid new entry). BUY or SELL only with strong agent consensus.";
-                case BEARISH        -> "Prefer SELL when agent signals support it. Avoid BUY.";
-                case STRONG_BEARISH -> "Only signal SELL. Do NOT signal BUY in a strongly bearish market.";
+                case BEARISH        -> "Signal SELL when agent signals support it. The market is trending down. SELL = ENTER SHORT (buy PE options). BUY is incorrect in this direction.";
+                case STRONG_BEARISH -> "Signal SELL. The market is strongly bearish. SELL = ENTER SHORT (sell Nifty futures or buy PE options). BUY is incorrect in this direction.";
             };
             biasSection = String.format("""
 
             Directional Bias (TrendAgent 5-factor vote):
               Bias   : %s
               Rule   : %s
-              Constraint : Never signal BUY in a BEARISH/STRONG_BEARISH market.
-                           Never signal SELL in a BULLISH/STRONG_BULLISH market.
-                           NEUTRAL bias → prefer WATCH to avoid choppy-market losses.
+              Important: BUY (ENTER LONG) and SELL (ENTER SHORT) are equally valid signals.
+                         Use SELL in BEARISH/STRONG_BEARISH markets just as you would use BUY in BULLISH markets.
+                         NEUTRAL bias → prefer WATCH to avoid choppy-market losses.
             """, bias.name(), biasRule);
         }
 
@@ -315,15 +317,16 @@ public class AIStrategistService {
 
             Agent Signals (with history-adjusted adaptive weights):
             %s%s%s%s%s%s%s
-            Based on the market regime, the weighted agent signals, directional bias, \
-            and risk discipline, provide your strategic recommendation.
+            Based on the market regime, the weighted agent signals, and directional bias, \
+            determine the correct trade direction and provide your recommendation.
 
             %s
 
             Trade Direction Clarification:
-              BUY  = ENTER LONG  (buy Nifty futures or CE options)
-              SELL = ENTER SHORT (sell Nifty futures or buy PE options)
-              HOLD/WATCH = no new position (FLAT)
+              BUY  = ENTER LONG  (buy Nifty futures or CE options)   — use when bias is BULLISH or STRONG_BULLISH
+              SELL = ENTER SHORT (sell Nifty futures or buy PE options) — use when bias is BEARISH or STRONG_BEARISH
+              HOLD/WATCH = no new position — use when bias is NEUTRAL or conditions are unclear
+              Both BUY and SELL are valid signals. Match your signal to the directional bias.
 
             Respond ONLY with a JSON object in this exact format:
             {

@@ -114,4 +114,9 @@ public class DecisionHistory {
 
     /** STRONG_BULLISH / BULLISH / NEUTRAL / BEARISH / STRONG_BEARISH */
     private String directionalBias;
+
+    // ── v10 decision mode (Phase-34) ─────────────────────────────────────────
+
+    /** LIVE_AI | REPLAY_CONSENSUS_ONLY — prevents replay data from polluting edge registry */
+    private String decisionMode;
 }

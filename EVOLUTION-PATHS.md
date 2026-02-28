@@ -3,7 +3,7 @@
 **Classification:** Internal Engineering Reference
 **Audience:** Senior Backend Engineers, Staff Engineers, Principal Architects
 **Source of truth:** Codebase at `agent-platform/` — verified against all 9 modules
-**Last updated:** 2026-02-26
+**Last updated:** 2026-02-28
 
 ---
 
@@ -376,6 +376,10 @@ Phase 27:  Consensus guardrail uses adaptive weights — divergence now compares
 Phase 28:  AI strategist receives last 3 decisions as strategy memory — detects flip-flop across cycles
 Phase 29:  DivergenceGuard applied in buildDecision() — ConsensusOverride + ConfidenceDampen rules active
 Phase 30:  DivergenceGuard confidence floor (0.50) + RecentDecisionMemoryDTO replaces entity on /recent endpoint
+Phase 31:  Real P&L feedback loop — agent win rate now derived from actual profitable trade outcomes
+Phase 32:  Historical replay tuning engine — real Java pipeline replays real OHLCV candles, pre-trains agent weights
+Phase 33:  Directional bias layer — TrendAgent 5-vote bias; bias injected into AI prompt; tradeDirection on FinalDecision
+Phase 34:  Infrastructure stabilization — single-stack prod ports, replay gate in scheduler, replay AI skip, decision_mode column
 ```
 
 ```
@@ -387,14 +391,17 @@ history-service:
   Phase 16:  ... + decision metrics + market state provider (to trade-service)
   Phase 17:  ... + SSE snapshot stream (real-time push to UI)
   Phase 28:  ... + /recent/{symbol} strategy memory endpoint (RecentDecisionMemoryDTO — 4-field projection)
+  Phase 34:  ... + decision_mode column (LIVE_AI vs REPLAY_CONSENSUS_ONLY); findResolvedDecisions filters replay rows
 
 market-data-service:
   Phase 1:   pure Alpha Vantage pass-through
   Phase 11:  cache-aware data provider with regime-sensitive TTL
+  Phase 34:  replay sends X-Replay-Mode: true header; PIPELINE_SETTLE_MS reduced 1500→500ms
 
 scheduler-service:
   Phase 1:   fixed 5-minute cron
   Phase 7:   adaptive tempo controller (30s - 10min based on regime)
+  Phase 34:  isReplayRunning() gate — skips live trigger if replay RUNNING; HistoryClient @Qualifier resolved
 
 agent-orchestrator:
   Phase 1:   fetch -> analyze -> consensus -> persist
@@ -403,10 +410,13 @@ agent-orchestrator:
   Phase 27:  ... + adaptiveWeights passed to ConsensusIntegrationGuard (PerformanceWeightedConsensusStrategy active)
   Phase 28:  ... + fetchStrategyMemory() (last 3 decisions) chained before AI evaluate; memory injected into prompt
   Phase 29:  ... + computeDivergenceStreak() + DivergenceGuard applied in buildDecision()
+  Phase 33:  ... + directionalBias extracted from TrendAgent result; injected into DecisionContext; AI prompt enforces LONG/SHORT gate
+  Phase 34:  ... + replayMode param on orchestrate(); in replay mode skips fetchStrategyMemory + AI evaluate; divergenceStreak=0
 
 analysis-engine:
   Phase 1:   sequential synchronous agent dispatch
   Phase 17:  parallel reactive dispatch on boundedElastic + DisciplineCoach off Netty I/O threads
+  Phase 33:  TrendAgent computes 5-vote directional bias; stored in AnalysisResult.metadata["directionalBias"]
 
 trade-service:
   Phase 16:  read history projections -> compute momentum/posture/risk -> operator UI
@@ -429,6 +439,9 @@ common-lib:
   Phase 27:  + PerformanceWeightedConsensusStrategy; ConsensusEngine gains compute(results, weights) default method
   Phase 29:  + DivergenceGuard (guard package): OverrideResult record, ConsensusOverride + ConfidenceDampen rules
   Phase 30:  + DivergenceGuard CONFIDENCE_FLOOR = 0.50 applied to ConfidenceDampen rule
+  Phase 33:  + DirectionalBias enum (cognition package): STRONG_BULLISH/BULLISH/NEUTRAL/BEARISH/STRONG_BEARISH
+             + TradeDirection enum (model package): LONG/SHORT/FLAT
+             + DecisionContext gains directionalBias field (v19); FinalDecision gains tradeDirection + directionalBias (v9, 24 fields)
 ```
 
 ---
@@ -531,13 +544,16 @@ Six responsibilities with clear separation: trade lifecycle (persistence) + risk
 | Item | Location | Impact | Status |
 |---|---|---|---|
 | ~~Full table scan on every cycle~~ | `HistoryService` | ~~O(N) with no bound~~ | **RESOLVED** (Phase 17 — pre-aggregated `agent_performance_snapshot` table) |
-| Self-referential win rate | `aggregateFeedback()` | `winRate` measures alignment with AI strategist signal (since Phase 6), not market truth | OPEN |
+| Self-referential win rate | `aggregateFeedback()` | `winRate` measures alignment with AI strategist signal (since Phase 6), not market truth | **RESOLVED** (Phase 31 — real P&L feedback loop; market-truth win rate after ≥5 resolved outcomes) |
 | No idempotency on history save | `DecisionHistoryRepository` | Duplicate `traceId` -> duplicate rows | OPEN |
 | ~~Sequential agent execution~~ | `AgentDispatchService.dispatchAll()` | ~~Four agents run sequentially~~ | **RESOLVED** (Phase 17A — parallel reactive dispatch on boundedElastic) |
 | Unbounded `recentClosingPrices` | `fetchMarketDataAndBuildContext()` | Alpha Vantage response size determines memory per request | OPEN |
 | ~~No index on snapshot query~~ | `findLatestPerSymbol()` | ~~GROUP BY + MAX subquery full scan~~ | **RESOLVED** (v8 schema — composite index `idx_decision_history_symbol_savedat`) |
 | Trade-service in-memory state | `TradeService` maps | `riskStateMap`, `postureStabilityMap` lost on restart — adaptive state resets | ACCEPTED |
 | Projection pipeline non-atomic | `HistoryService.updateProjections()` | Projections may lag if upsert fails — wrapped in `onErrorResume`, never blocks save | ACCEPTED |
+| ~~Replay PIPELINE_SETTLE_MS too high~~ | `ReplayRunnerService` | ~~1500ms settle adds significant replay wall-clock time~~ | **RESOLVED** (Phase 34.3 — reduced to 500ms; replay now ~2s/candle total including pipeline) |
+| Replay data pollutes agent win rates | `findResolvedDecisions()` | Replay decisions were included in agent win-rate computation — skews market-truth feedback | **RESOLVED** (Phase 34.4 — decision_mode column; findResolvedDecisions filters REPLAY_CONSENSUS_ONLY rows) |
+| ~~Two-stack DB complexity~~ | `docker-compose.dev.yml` | ~~Dev stack (9080-9086, 9432) and prod-like stack diverged; risk of operating wrong stack~~ | **RESOLVED** (Phase 34.1 — single stack on prod ports 8080-8086, 5432) |
 
 ---
 
@@ -792,15 +808,17 @@ Replace `RestDecisionEventPublisher` with `KafkaDecisionPublisher`. `Orchestrato
 
 ### Recommended Execution Order (Remaining Paths)
 
-Paths 1, 9, and 12 are complete. The system now has adaptive consensus, AI memory, and divergence safety logic active.
+Paths 1, 9, 12, and the Phase 34 infrastructure stabilization are complete. The system now has adaptive consensus, AI memory, divergence safety logic, directional bias gating, and clean infrastructure (single stack, replay isolation) active.
 
 **Next evolution must be data-driven, not speculative.** Run the system, collect divergence frequency, measure override frequency, measure average dampening impact — then decide. The remaining paths in priority order once data is available:
 
-1. **Path 8: Regime Memory** — smooths scheduling transitions (LOW risk, scheduler-only)
-2. **Path 11: DecisionContext Persistence** — architectural cleanup, non-urgent (LOW risk)
-3. **Path 13 (remaining): trace_id index + partitioning** — prerequisite for long-term operation
-4. **Path 7: Kafka Streaming** — infrastructure upgrade, deferred until scale demands it
-5. **Path 10: Multi-Model Cross-Validation** — research path, cost and latency implications
+1. **Phase 35: Authority Chain + Hard Gates** — prevent invalid LONG/SHORT from reaching persistence; hard guard on tradeDirection vs directionalBias consistency
+2. **Phase 36: TradeEligibilityGuard** — pre-trade eligibility check; session + bias + regime gate before any BUY/SELL enters execution path
+3. **Path 8: Regime Memory** — smooths scheduling transitions (LOW risk, scheduler-only)
+4. **Path 11: DecisionContext Persistence** — architectural cleanup, non-urgent (LOW risk)
+5. **Path 13 (remaining): trace_id index + partitioning** — prerequisite for long-term operation
+6. **Path 7: Kafka Streaming** — infrastructure upgrade, deferred until scale demands it
+7. **Path 10: Multi-Model Cross-Validation** — research path, cost and latency implications
 
 ---
 
@@ -818,6 +836,8 @@ Paths 1, 9, and 12 are complete. The system now has adaptive consensus, AI memor
 | **PostgreSQL connection pool saturation** | LOW | Default R2DBC pool = 10 connections. Under concurrent orchestrations, performance/feedback aggregation calls could saturate the pool |
 | **Trade-service in-memory state loss** | LOW | `riskStateMap`, `postureStabilityMap`, `postureMap` are in-memory. Container restart loses adaptive risk state and posture stability — resets to defaults on next evaluation |
 | **History-service load from trade-service** | LOW | Trade-service calls `/decision-metrics/{symbol}` and `/market-state` on every `getActiveTrade()` request, adding query load to an already multi-role service |
+| **~~Replay data pollutes win-rate feedback~~** | ~~MEDIUM~~ RESOLVED | Fixed in Phase 34.4: `decision_mode` column added; `findResolvedDecisions()` filters `AND (decision_mode IS NULL OR decision_mode = 'LIVE_AI')`. Replay rows tagged `REPLAY_CONSENSUS_ONLY` are excluded |
+| **Live scheduler firing during replay** | LOW | ~~Scheduler triggers live orchestration while replay is running — race condition on shared pipeline~~ | **RESOLVED** (Phase 34.2 — `isReplayRunning()` check in `MarketDataScheduler`; live trigger skipped if replay RUNNING) |
 
 ### Reactive Anti-Patterns
 
@@ -853,7 +873,7 @@ The real risk is not cost but **rate limiting**. Anthropic's rate limits are per
 
 ---
 
-*Review conducted against codebase as of 2026-02-26. All class names, method signatures, and data flows verified against source. 9 modules (8 Java + 1 React UI), 70+ Java files, 20+ REST endpoints, 22-component FinalDecision (v8), 18-field DecisionContext, 4 analysis agents, 2 AI integration points, regime-aware model selection, regime-aware cache, 1 adaptive scheduler, momentum tracking (MomentumStateCalculator), trade posture interpretation (TradePostureInterpreter + StructureInterpreter), adaptive risk engine (AdaptiveRiskEngine), trade service (operator intelligence), PostgreSQL persistence.*
+*Review conducted against codebase as of 2026-02-28. All class names, method signatures, and data flows verified against source. 9 modules (8 Java + 1 React UI), 70+ Java files, 20+ REST endpoints, 24-component FinalDecision (v9), 19-field DecisionContext, 4 analysis agents, 2 AI integration points, regime-aware model selection, regime-aware cache, 1 adaptive scheduler with replay gate, momentum tracking (MomentumStateCalculator), trade posture interpretation (TradePostureInterpreter + StructureInterpreter), adaptive risk engine (AdaptiveRiskEngine), directional bias layer (TrendAgent 5-vote, DirectionalBias enum, TradeDirection enum), trade service (operator intelligence), PostgreSQL persistence, single-stack infrastructure (prod ports 8080-8086, 5432), decision_mode isolation (LIVE_AI vs REPLAY_CONSENSUS_ONLY).*
 
 ---
 
@@ -1443,8 +1463,241 @@ SPRING_PROFILES_ACTIVE: historical-replay
 | DivergenceGuard threshold | Unvalidated 0.65 | Empirically observable from replay data |
 | Winning windows | Unknown | OPENING_BURST+TRENDING vs POWER_HOUR+CALM measurable |
 
-**Technical debt introduced:** Replay runs sequentially (one candle per 2s+ settle time) — 8,400 candles takes ~5 hours. A future optimisation could reduce `PIPELINE_SETTLE_MS` to 500ms for faster replay once the AI rate limits are verified.
+**Technical debt introduced (now resolved in Phase 34.3):** Replay ran at 1500ms settle (2s+ per candle, ~5 hours for 8,400 candles). Phase 34.3 reduced `PIPELINE_SETTLE_MS` to 500ms and added the `X-Replay-Mode` AI skip — effective throughput is now ~2s/candle (~4.5 hours for 8,400 candles). Further reduction requires verifying Anthropic rate limits for DisciplineCoach (which still runs during replay).
 
 ---
 
 *Review last updated: 2026-02-28. Phases 27–32 verified against codebase. DivergenceGuard active. Strategy memory active. Real P&L feedback loop active. Historical replay tuning engine active.*
+
+---
+
+## Phase 33 — Directional Bias Layer ✅ COMPLETED 2026-02-28
+
+**Goal:** Introduce a 5-vote directional bias computed by TrendAgent. The bias propagates through the pipeline into the AI prompt, enforcing that BUY signals only fire in bullish bias conditions and SELL signals only fire in bearish bias conditions. tradeDirection (LONG/SHORT/FLAT) is added to the FinalDecision record for downstream consumption.
+
+### 33A — common-lib additions
+
+| Artifact | Location | Role |
+|---|---|---|
+| `DirectionalBias` | `cognition/DirectionalBias.java` | Enum: `STRONG_BULLISH`, `BULLISH`, `NEUTRAL`, `BEARISH`, `STRONG_BEARISH` |
+| `TradeDirection` | `model/TradeDirection.java` | Enum: `LONG`, `SHORT`, `FLAT` |
+
+### 33B — analysis-engine: TrendAgent 5-vote bias computation
+
+`TrendAgent` computes a 5-vote directional majority:
+
+| Vote | Signal |
+|---|---|
+| Price trend (recent slope) | Bullish / Bearish |
+| MACD histogram sign | Bullish / Bearish |
+| Price > SMA20 | Bullish / Bearish |
+| Price > EMA12 | Bullish / Bearish |
+| 5-candle momentum | Bullish / Bearish |
+
+Majority vote maps to `DirectionalBias`: 5/5 bullish → `STRONG_BULLISH`, 4/5 → `BULLISH`, 2-3/5 → `NEUTRAL`, 1/5 → `BEARISH`, 0/5 → `STRONG_BEARISH`.
+
+Bias stored as `AnalysisResult.metadata["directionalBias"]` (String — `DirectionalBias.name()`).
+
+### 33C — agent-orchestrator: bias extraction and DecisionContext enrichment
+
+`OrchestratorService` extracts `directionalBias` from the TrendAgent `AnalysisResult.metadata` after the analysis engine returns. Bias is injected into `DecisionContext` via `withDirectionalBias(DirectionalBias)`.
+
+`DecisionContext` extended from 18 → 19 fields: `DirectionalBias directionalBias` (nullable).
+
+### 33D — AIStrategistService prompt delta
+
+New bias section injected into the AI prompt:
+
+```
+Directional Bias (TrendAgent 5-vote):
+  Bias: BULLISH
+  Rule: Only generate BUY / LONG signals when bias is BULLISH or STRONG_BULLISH.
+        Only generate SELL / SHORT signals when bias is BEARISH or STRONG_BEARISH.
+        NEUTRAL bias → prefer HOLD or WATCH.
+```
+
+### 33E — FinalDecision v9 and AIStrategyDecision
+
+`AIStrategyDecision` gained `TradeDirection tradeDirection` (8th field). `AIStrategistService.parseResponse()` extracts `tradeDirection` from JSON.
+
+`FinalDecision` grew from 22 → 24 fields (v9):
+- `TradeDirection tradeDirection` — LONG/SHORT/FLAT from AI decision
+- `String directionalBias` — DirectionalBias enum name from TrendAgent computation
+
+v9 factory `of(...)` added. All prior factories updated to pass null for new fields.
+
+### 33F — Persistence and UI
+
+**DecisionHistory:** `trade_direction VARCHAR(10)`, `directional_bias VARCHAR(20)` columns added to `schema.sql`. `DecisionHistory.java` gains both fields. `HistoryService.save()` maps them from `FinalDecision`.
+
+**SnapshotDecisionDTO:** `tradeDirection` and `directionalBias` fields added. UI `SnapshotCard` shows `DirectionBadge` (↑ LONG / ↓ SHORT / — FLAT) and bias label. `DetailModal` shows both rows.
+
+**Files changed:**
+
+| Module | File | Change |
+|---|---|---|
+| common-lib | NEW `cognition/DirectionalBias.java` | Enum: 5 bias values |
+| common-lib | NEW `model/TradeDirection.java` | Enum: LONG/SHORT/FLAT |
+| common-lib | `model/DecisionContext.java` | +1 field: directionalBias; withDirectionalBias() copy-factory |
+| common-lib | `model/FinalDecision.java` | v9: +2 fields; updated v9 factory; prior factories pass null |
+| common-lib | `model/AIStrategyDecision.java` | +1 field: tradeDirection (8-arg constructor) |
+| analysis-engine | `agent/TrendAgent.java` | 5-vote directional bias computation; stored in metadata["directionalBias"] |
+| agent-orchestrator | `service/OrchestratorService.java` | Extracts bias from TrendAgent result; withDirectionalBias() call |
+| agent-orchestrator | `ai/AIStrategistService.java` | Bias section in prompt; parseResponse() extracts tradeDirection |
+| history-service | `schema.sql` | trade_direction VARCHAR(10), directional_bias VARCHAR(20) |
+| history-service | `model/DecisionHistory.java` | +2 fields: tradeDirection, directionalBias |
+| history-service | `service/HistoryService.java` | Maps tradeDirection + directionalBias from FinalDecision |
+| history-service | `dto/SnapshotDecisionDTO.java` | +2 fields: tradeDirection, directionalBias |
+| ui | `components/SnapshotCard.jsx` | DirectionBadge component; bias label display |
+| ui | `components/DetailModal.jsx` | tradeDirection + directionalBias rows |
+
+---
+
+## Phase 34 — Infrastructure Stabilization ✅ COMPLETED 2026-02-28
+
+**Goal:** Four targeted infrastructure improvements: unify dev/prod stacks to a single-stack on prod ports, gate the scheduler during replay, skip the expensive AI strategist call during replay (DisciplineCoach still runs), and tag replay decisions with `decision_mode` to exclude them from agent win-rate computation.
+
+### 34.1 — Single DB + Prod Ports
+
+**Problem:** The platform previously ran two conceptually separate stacks — a "dev" compose on ports 9080-9086 / postgres 9432 with container names prefixed `dev-`, and a "prod" reference configuration. This created confusion about which stack to operate and risk of hitting the wrong database.
+
+**Resolution:** `docker-compose.dev.yml` is now the **single compose file**. `docker-compose.yml` is an archive (not deleted, not used).
+
+| Change | Detail |
+|---|---|
+| Container ports | 9080-9086 → **8080-8086** (prod ports) |
+| Postgres port | 9432 → **5432** |
+| Container names | `dev-market-data-service`, `dev-agent-postgres`, etc. → `market-data-service`, `agent-postgres`, etc. (no `dev-` prefix) |
+| Network | `agent-net` |
+| Volume | `pgdata` |
+| Previous dev data | Preserved in `agent-platform-dev_pgdata-dev` volume (reference only) |
+
+**Downstream file updates:**
+
+| File | Change |
+|---|---|
+| `ui/vite.config.js` | Proxy targets updated: `9085` → `8085`, `9086` → `8086` |
+| `scripts/load_nifty_candles.py` | `DB_PORT` updated: `9432` → `5432` |
+
+### 34.2 — Scheduler Replay Gate
+
+**Problem:** When the historical replay is running, the scheduler continues firing live orchestration triggers into the same pipeline. This creates a race: live triggers and replay triggers both drive the same agents, same history save, same P&L resolution — producing a corrupted mix of live and replay decisions.
+
+**Resolution:** `MarketDataScheduler` checks replay status before triggering. If replay is `RUNNING`, the live trigger is skipped for that cycle.
+
+| Artifact | Change |
+|---|---|
+| `scheduler-service/application.yml` | Added `services.market-data.base-url` for replay status endpoint |
+| `config/SchedulerConfig.java` | Added `@Bean("marketDataClient")`, `@Bean("orchestratorClient")`, `@Bean("historyWebClient")` with `@Qualifier` to resolve Spring ambiguity when multiple `WebClient` beans exist |
+| `job/MarketDataScheduler.java` | Added `isReplayRunning()` check — `GET /api/v1/market-data/replay/status` → if status is `RUNNING`, returns immediately without triggering orchestration |
+| `client/HistoryClient.java` | Added `@Qualifier("historyWebClient")` to constructor injection |
+
+### 34.3 — Replay Mode Flag (Skip AI Strategist)
+
+**Problem:** During replay, each candle triggers a full orchestration pipeline including the Anthropic AI Strategist call. At 500ms settle, even a modest AI API rate limit could throttle the replay — and the AI strategist adds cost without adding value during replay (replay goal is to pre-train agents with P&L feedback, not to exercise AI reasoning).
+
+**Resolution:** `ReplayRunnerService` sends an `X-Replay-Mode: true` HTTP header with each trigger. The orchestrator reads this header and, when set, skips `fetchStrategyMemory()` and `AIStrategistService.evaluate()`. The `ConsensusIntegrationGuard` (consensus-only path) is used directly instead. `divergenceStreak` is set to 0 (no strategy memory = no streak computation). `DisciplineCoach` in analysis-engine still runs — it cannot be skipped because it is invoked by analysis-engine, which receives no replay mode signal.
+
+| Artifact | Change |
+|---|---|
+| `market-data-service/.../replay/ReplayRunnerService.java` | Sends `X-Replay-Mode: true` header on each trigger POST; `PIPELINE_SETTLE_MS` reduced `1500 → 500ms` |
+| `agent-orchestrator/.../controller/OrchestratorController.java` | Reads `@RequestHeader(value="X-Replay-Mode", defaultValue="false") boolean replayMode`; passes to service |
+| `agent-orchestrator/.../service/OrchestratorService.java` | `orchestrate(event, replayMode)` — when `replayMode=true`: skips `fetchStrategyMemory()`, skips `aiStrategistService.evaluate()`, calls `ConsensusIntegrationGuard` directly, sets `divergenceStreak=0` |
+
+**Effective replay throughput:** ~2s per candle total (500ms settle + ~1.5s analysis-engine parallel dispatch including DisciplineCoach Haiku call). At this rate, 8,400 candles (60 days × 140 market candles/day) completes in approximately 4.5–5 hours.
+
+### 34.4 — decision_mode Column
+
+**Problem:** Replay decisions (produced via consensus-only path) were treated identically to live AI decisions in agent win-rate computation. After a replay, `findResolvedDecisions()` would return both live and replay rows, skewing the agent win rates toward whatever the consensus produced during replay (rather than what the AI + consensus combination produces in production).
+
+**Resolution:** A `decision_mode` column is added to `decision_history`. All live AI decisions are tagged `LIVE_AI`. All replay decisions are tagged `REPLAY_CONSENSUS_ONLY`. The `findResolvedDecisions()` query filters to exclude replay rows, ensuring agent win-rate feedback reflects only production decision quality.
+
+| Artifact | Change |
+|---|---|
+| `history-service/schema.sql` | `decision_mode VARCHAR(30)` column added to `decision_history` |
+| `history-service/.../model/DecisionHistory.java` | `String decisionMode` field added |
+| `history-service/.../service/HistoryService.java` | Maps `metadata["decision_mode"]` → `entity.decisionMode`; defaults to `"LIVE_AI"` if not present |
+| `history-service/.../repository/DecisionHistoryRepository.java` | `findResolvedDecisions()` query updated: `AND (decision_mode IS NULL OR decision_mode = 'LIVE_AI')` |
+
+**decision_mode values:**
+
+| Value | When set |
+|---|---|
+| `LIVE_AI` | Normal production decisions (AI Strategist + DivergenceGuard active) |
+| `REPLAY_CONSENSUS_ONLY` | Historical replay decisions (consensus only; AI Strategist skipped) |
+
+**Note:** The `decision_mode` is not set by the orchestrator itself — it is passed via `FinalDecision.metadata["decision_mode"]` injected by `ReplayRunnerService` before triggering. In live mode, no `decision_mode` metadata key is set, so `HistoryService` defaults to `"LIVE_AI"`.
+
+### 34 — Architecture impact summary
+
+```
+Before Phase 34:
+  - Two conceptual stacks (dev ports 9080-9086 vs prod ports 8080-8086)
+  - Scheduler fires during replay (race condition)
+  - Full AI pipeline runs during replay (cost + rate-limit risk)
+  - Replay decisions mixed into agent win-rate computation
+  - PIPELINE_SETTLE_MS = 1500ms
+
+After Phase 34:
+  - Single stack on prod ports (8080-8086, 5432)
+  - Scheduler skips live triggers while replay RUNNING
+  - AI Strategist skipped during replay (consensus path only; DisciplineCoach still runs)
+  - Replay decisions tagged REPLAY_CONSENSUS_ONLY, excluded from findResolvedDecisions()
+  - PIPELINE_SETTLE_MS = 500ms
+```
+
+---
+
+## Phase 35 — Authority Chain + Hard Gates (PLANNED)
+
+**Goal:** Prevent directionally invalid decisions from reaching persistence. A hard gate checks that the `tradeDirection` emitted by the AI Strategist is consistent with the `directionalBias` from TrendAgent. A LONG signal with BEARISH/STRONG_BEARISH bias, or a SHORT signal with BULLISH/STRONG_BULLISH bias, is overridden to FLAT before persistence.
+
+**Scope:** `agent-orchestrator` (`OrchestratorService` or new `AuthorityChainGuard` class). No schema changes required (tradeDirection already persisted).
+
+**Risk level:** LOW-MEDIUM. Pure additive guard; does not modify upstream AI call or consensus computation.
+
+---
+
+## Phase 36 — TradeEligibilityGuard (PLANNED)
+
+**Goal:** A composite pre-trade eligibility check that gates entry on multiple conditions simultaneously: active trading session (OPENING_BURST or POWER_HOUR), directional bias aligned with signal, and regime not VOLATILE (or explicit VOLATILE permission). Prevents the AI from recommending a LONG in OFF_HOURS with BEARISH bias.
+
+**Scope:** New `TradeEligibilityGuard` in `common-lib/guard` or `agent-orchestrator/guard`. Evaluated in `OrchestratorService.buildDecision()` after DivergenceGuard.
+
+**Risk level:** LOW. Purely additive. Session gating already exists in AI prompt layer — this adds a deterministic enforcement layer below the AI.
+
+---
+
+## Phase 37 — AI Prompt Adjustment (PLANNED)
+
+**Goal:** Refine AI prompt structure based on data collected from Phase 34 replay runs and Phase 35-36 guard activations. Adjustments may include: tightening bias-override language, adding confidence penalty for NEUTRAL-bias BUY/SELL recommendations, and tuning the DivergenceGuard thresholds based on empirical override frequency.
+
+**Scope:** `agent-orchestrator/ai/AIStrategistService.java` prompt construction. No schema, pipeline, or interface changes.
+
+**Risk level:** LOW. Prompt-only changes. Behavior observable via existing `aiReasoning` field.
+
+---
+
+## Phase 38a — WinConditionRegistry (Passive) (PLANNED)
+
+**Goal:** Build a registry that tracks which combinations of (session, regime, directionalBias, tradeDirection) produce profitable outcomes — without yet acting on it. This is pure observability: after 2–4 weeks of live operation post-replay pre-training, the registry reveals which condition combinations have real edge.
+
+**Scope:** New table or in-memory structure in `history-service`. New `GET /analytics/win-conditions` endpoint.
+
+**Prerequisites:** Phase 35-36 guards must be active (ensures clean data — no invalid tradeDirection in history). Minimum 30 resolved trades.
+
+**Risk level:** LOW. Purely additive analytics layer.
+
+---
+
+## Phase 38b — WinConditionRegistry (Active) (PLANNED)
+
+**Goal:** Promote the WinConditionRegistry from observability to enforcement. If a proposed trade's condition combination has a historical win rate below threshold (e.g., <40%), the signal is downgraded to HOLD regardless of AI recommendation.
+
+**Prerequisites:** Phase 38a with at least 6 months of Angel One data (~50K+ candles). Win-rate estimates must be statistically stable (≥30 resolved outcomes per condition combination).
+
+**Risk level:** MEDIUM. First data-driven autonomous override that does not rely on AI or consensus — pure historical pattern enforcement.
+
+---
+
+*Review last updated: 2026-02-28. Phases 27–34 complete. Phases 35–38 roadmap documented. Single-stack infrastructure active. Directional bias enforcement active. Replay AI skip active. decision_mode isolation active.*

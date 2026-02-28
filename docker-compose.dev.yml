@@ -2,23 +2,21 @@ version: "3.9"
 
 # ─────────────────────────────────────────────────────
 # Hybrid Trading Intelligence Agent Platform
-# FEATURE BRANCH Dev Compose  (ports 9080-9086, 9432)
+# Single Compose — prod ports (8080-8086, 5432)
 # Run with: docker-compose -f docker-compose.dev.yml up --build -d
 # Stop with: docker-compose -f docker-compose.dev.yml down
 # ─────────────────────────────────────────────────────
-# Does NOT touch the production stack (ports 8080-8086)
-# Uses separate containers (dev-*), volume (pgdata-dev),
-# network (agent-net-dev) and image tags (:dev)
-# Project name is isolated via 'name' to avoid conflicts
+# One stack, one DB, one source of truth.
+# Old dev data preserved in pgdata-dev volume (reference only).
 # ─────────────────────────────────────────────────────
 
-name: agent-platform-dev
+name: agent-platform
 
 volumes:
-  pgdata-dev:
+  pgdata:
 
 networks:
-  agent-net-dev:
+  agent-net:
     driver: bridge
 
 services:
@@ -31,9 +29,9 @@ services:
       args:
         SERVICE: market-data-service
     image: agent-platform/market-data-service:dev
-    container_name: dev-market-data-service
+    container_name: market-data-service
     ports:
-      - "9080:8080"
+      - "8080:8080"
     environment:
       SPRING_PROFILES_ACTIVE:  ${SPRING_PROFILES_ACTIVE:-}
       ALPHA_VANTAGE_API_KEY:   ${ALPHA_VANTAGE_API_KEY:-}
@@ -42,10 +40,10 @@ services:
       ANGELONE_PASSWORD:       ${ANGELONE_PASSWORD:-}
       ANGELONE_TOTP_SECRET:    ${ANGELONE_TOTP_SECRET:-}
       # Phase-32: replay tuning — required when SPRING_PROFILES_ACTIVE=historical-replay
-      HISTORY_URL:             http://dev-history-service:8085
-      ORCHESTRATOR_URL:        http://dev-agent-orchestrator:8081
+      HISTORY_URL:             http://history-service:8085
+      ORCHESTRATOR_URL:        http://agent-orchestrator:8081
     networks:
-      - agent-net-dev
+      - agent-net
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/v1/market-data/health || exit 1"]
       interval: 30s
@@ -61,13 +59,13 @@ services:
       args:
         SERVICE: analysis-engine
     image: agent-platform/analysis-engine:dev
-    container_name: dev-analysis-engine
+    container_name: analysis-engine
     ports:
-      - "9083:8083"
+      - "8083:8083"
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     networks:
-      - agent-net-dev
+      - agent-net
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8083/api/v1/analyze/health || exit 1"]
       interval: 30s
@@ -83,14 +81,14 @@ services:
       args:
         SERVICE: notification-service
     image: agent-platform/notification-service:dev
-    container_name: dev-notification-service
+    container_name: notification-service
     ports:
-      - "9084:8084"
+      - "8084:8084"
     environment:
       SLACK_ENABLED: ${SLACK_ENABLED:-false}
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
     networks:
-      - agent-net-dev
+      - agent-net
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8084/api/v1/notify/health || exit 1"]
       interval: 30s
@@ -106,14 +104,14 @@ services:
       args:
         SERVICE: agent-orchestrator
     image: agent-platform/agent-orchestrator:dev
-    container_name: dev-agent-orchestrator
+    container_name: agent-orchestrator
     ports:
-      - "9081:8081"
+      - "8081:8081"
     environment:
-      MARKET_DATA_URL:     http://dev-market-data-service:8080
-      ANALYSIS_ENGINE_URL: http://dev-analysis-engine:8083
-      NOTIFICATION_URL:    http://dev-notification-service:8084
-      HISTORY_URL:         http://dev-history-service:8085
+      MARKET_DATA_URL:     http://market-data-service:8080
+      ANALYSIS_ENGINE_URL: http://analysis-engine:8083
+      NOTIFICATION_URL:    http://notification-service:8084
+      HISTORY_URL:         http://history-service:8085
       ANTHROPIC_API_KEY:   ${ANTHROPIC_API_KEY:-}
     depends_on:
       market-data-service:
@@ -125,7 +123,7 @@ services:
       history-service:
         condition: service_healthy
     networks:
-      - agent-net-dev
+      - agent-net
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8081/api/v1/orchestrate/health || exit 1"]
       interval: 30s
@@ -133,20 +131,20 @@ services:
       retries: 3
       start_period: 30s
 
-  # ── 5a. PostgreSQL (isolated dev volume) ──────────
+  # ── 5a. PostgreSQL ────────────────────────────────
   postgres:
     image: postgres:16-alpine
-    container_name: dev-agent-postgres
+    container_name: agent-postgres
     ports:
-      - "9432:5432"
+      - "5432:5432"
     environment:
       POSTGRES_DB:       agent_platform
       POSTGRES_USER:     agent
       POSTGRES_PASSWORD: agent_secret
     volumes:
-      - pgdata-dev:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
     networks:
-      - agent-net-dev
+      - agent-net
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U agent -d agent_platform"]
       interval: 10s
@@ -162,18 +160,18 @@ services:
       args:
         SERVICE: history-service
     image: agent-platform/history-service:dev
-    container_name: dev-history-service
+    container_name: history-service
     ports:
-      - "9085:8085"
+      - "8085:8085"
     environment:
-      POSTGRES_R2DBC_URL: r2dbc:postgresql://dev-agent-postgres:5432/agent_platform
+      POSTGRES_R2DBC_URL: r2dbc:postgresql://agent-postgres:5432/agent_platform
       POSTGRES_USER:      agent
       POSTGRES_PASSWORD:  agent_secret
     depends_on:
       postgres:
         condition: service_healthy
     networks:
-      - agent-net-dev
+      - agent-net
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8085/api/v1/history/health || exit 1"]
       interval: 30s
@@ -189,21 +187,21 @@ services:
       args:
         SERVICE: trade-service
     image: agent-platform/trade-service:dev
-    container_name: dev-trade-service
+    container_name: trade-service
     ports:
-      - "9086:8086"
+      - "8086:8086"
     environment:
-      POSTGRES_R2DBC_URL:  r2dbc:postgresql://dev-agent-postgres:5432/agent_platform
+      POSTGRES_R2DBC_URL:  r2dbc:postgresql://agent-postgres:5432/agent_platform
       POSTGRES_USER:       agent
       POSTGRES_PASSWORD:   agent_secret
-      HISTORY_SERVICE_URL: http://dev-history-service:8085
+      HISTORY_SERVICE_URL: http://history-service:8085
     depends_on:
       postgres:
         condition: service_healthy
       history-service:
         condition: service_healthy
     networks:
-      - agent-net-dev
+      - agent-net
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8086/api/v1/trade/health || exit 1"]
       interval: 30s
@@ -219,17 +217,18 @@ services:
       args:
         SERVICE: scheduler-service
     image: agent-platform/scheduler-service:dev
-    container_name: dev-scheduler-service
+    container_name: scheduler-service
     ports:
-      - "9082:8082"
+      - "8082:8082"
     environment:
-      ORCHESTRATOR_URL: http://dev-agent-orchestrator:8081
-      HISTORY_URL:      http://dev-history-service:8085
-      WATCHED_SYMBOLS:  ${WATCHED_SYMBOLS:-NIFTYBEES.BSE}
+      ORCHESTRATOR_URL:  http://agent-orchestrator:8081
+      HISTORY_URL:       http://history-service:8085
+      MARKET_DATA_URL:   http://market-data-service:8080
+      WATCHED_SYMBOLS:   ${WATCHED_SYMBOLS:-NIFTYBEES.BSE}
     depends_on:
       agent-orchestrator:
         condition: service_healthy
       history-service:
         condition: service_healthy
     networks:
-      - agent-net-dev
+      - agent-net

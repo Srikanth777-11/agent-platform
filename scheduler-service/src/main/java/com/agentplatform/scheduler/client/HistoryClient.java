@@ -3,6 +3,7 @@ package com.agentplatform.scheduler.client;
 import com.agentplatform.common.model.MarketRegime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
@@ -21,7 +22,7 @@ public class HistoryClient {
 
     private final WebClient historyClient;
 
-    public HistoryClient(WebClient historyClient) {
+    public HistoryClient(@Qualifier("historyWebClient") WebClient historyClient) {
         this.historyClient = historyClient;
     }
 

@@ -6,17 +6,21 @@
 
 ## Module → Port → Internal URL
 
-| Module | Port | Container URL (dev) |
+Single stack (Phase 34.1). `docker-compose.dev.yml` is the **only active compose file**. `docker-compose.yml` is archive.
+
+| Module | Host Port | Container URL (internal) |
 |---|---|---|
-| market-data-service | 8080 | `http://dev-market-data-service:8080` |
-| agent-orchestrator  | 8081 | `http://dev-agent-orchestrator:8081` |
-| scheduler-service   | 8082 | `http://dev-scheduler-service:8082` |
-| analysis-engine     | 8083 | `http://dev-analysis-engine:8083` |
-| notification-service| 8084 | `http://dev-notification-service:8084` |
-| history-service     | 8085 | `http://dev-history-service:8085` |
-| trade-service       | 8086 | `http://dev-trade-service:8086` |
+| market-data-service | 8080 | `http://market-data-service:8080` |
+| agent-orchestrator  | 8081 | `http://agent-orchestrator:8081` |
+| scheduler-service   | 8082 | `http://scheduler-service:8082` |
+| analysis-engine     | 8083 | `http://analysis-engine:8083` |
+| notification-service| 8084 | `http://notification-service:8084` |
+| history-service     | 8085 | `http://history-service:8085` |
+| trade-service       | 8086 | `http://trade-service:8086` |
 | ui (Vite dev)       | 5173 | — |
-| postgres (dev)      | 9432 | `dev-agent-postgres:5432` |
+| postgres            | 5432 | `agent-postgres:5432` |
+
+**Network:** `agent-net`  **Volume:** `pgdata`  **Previous dev data:** preserved in `agent-platform-dev_pgdata-dev` volume (reference only, not active)
 
 ---
 
@@ -112,7 +116,7 @@ double confidenceScore,
 Map<String,Object> metadata
 ```
 
-### FinalDecision  (22 fields, v8)
+### FinalDecision  (24 fields, v9)
 ```java
 // v1
 String symbol, Instant timestamp, List<AnalysisResult> agents,
@@ -132,19 +136,24 @@ Boolean divergenceFlag
 // v8
 String tradingSession, Double entryPrice, Double targetPrice,
 Double stopLoss, Integer estimatedHoldMinutes
+// v9 (Phase 33)
+TradeDirection tradeDirection,   // LONG/SHORT/FLAT
+String directionalBias           // DirectionalBias.name() — e.g. "BULLISH", "STRONG_BEARISH"
 ```
 
-### AIStrategyDecision
+### AIStrategyDecision  (8 fields)
 ```java
 String finalSignal, double confidence, String reasoning,
-Double entryPrice, Double targetPrice, Double stopLoss, Integer estimatedHoldMinutes
+Double entryPrice, Double targetPrice, Double stopLoss, Integer estimatedHoldMinutes,
+TradeDirection tradeDirection   // Phase 33
 ```
 
-### DecisionContext  (18 fields, immutable, copy-factories)
+### DecisionContext  (19 fields, immutable, copy-factories)
 Key fields: symbol, traceId, timestamp, regime, agentResults, adaptiveWeights,
 latestClose, tradingSession, aiDecision, consensusScore, divergenceFlag,
 stabilityPressure, calmTrajectory, divergenceTrajectory,
-reflectionState, calmMood, reflectionPersistence
+reflectionState, calmMood, reflectionPersistence,
+directionalBias   // Phase 33 — DirectionalBias enum
 
 ### MarketDataQuote
 ```java
@@ -187,9 +196,19 @@ divergence_flag BOOLEAN,
 -- v8
 trading_session VARCHAR(30), entry_price DOUBLE, target_price DOUBLE,
 stop_loss DOUBLE, estimated_hold_minutes INT,
-outcome_percent DOUBLE, outcome_hold_minutes INT, outcome_resolved BOOLEAN
+outcome_percent DOUBLE, outcome_hold_minutes INT, outcome_resolved BOOLEAN,
+-- Phase 33
+trade_direction VARCHAR(10),       -- LONG / SHORT / FLAT
+directional_bias VARCHAR(20),      -- DirectionalBias enum name
+-- Phase 34.4
+decision_mode VARCHAR(30)          -- LIVE_AI (default) | REPLAY_CONSENSUS_ONLY
 INDEX: (symbol, saved_at DESC)
 ```
+
+**decision_mode values:**
+- `LIVE_AI` — normal production decisions (AI Strategist + DivergenceGuard active). Default when field is NULL.
+- `REPLAY_CONSENSUS_ONLY` — historical replay decisions (consensus path only; AI Strategist skipped).
+- `findResolvedDecisions()` filters: `AND (decision_mode IS NULL OR decision_mode = 'LIVE_AI')` — replay rows excluded from agent win-rate computation.
 
 ### agent_performance_snapshot
 ```sql
@@ -232,12 +251,14 @@ INDEX: (symbol, candle_time ASC)
 ### common-lib
 ```
 model/
-  FinalDecision.java         22-field record, 7 backward-compat factories
+  FinalDecision.java         24-field record (v9), 8 backward-compat factories
   AnalysisResult.java        agentName, signal, confidenceScore, metadata
   Context.java               orchestrator→analysis input (prices, marketData)
-  DecisionContext.java       immutable pipeline snapshot, copy-factories
-  AIStrategyDecision.java    AI output: signal + entry/target/stop/hold
+  DecisionContext.java       immutable pipeline snapshot, 19 fields, copy-factories
+                             withDirectionalBias(DirectionalBias) — Phase 33
+  AIStrategyDecision.java    AI output: signal + entry/target/stop/hold + tradeDirection (8 fields)
   MarketRegime.java          enum: CALM RANGING TRENDING VOLATILE UNKNOWN
+  TradeDirection.java        enum: LONG / SHORT / FLAT  (Phase 33)
   AgentFeedback.java         winRate, avgConfidence, avgLatencyMs
   AgentPerformanceModel.java historicalAccuracyScore, latencyWeight
   MarketState.java           BUILDING_MOMENTUM / COOLING_DOWN / etc.
@@ -246,6 +267,7 @@ event/
 cognition/
   TradingSession.java        enum: OPENING_BURST POWER_HOUR MIDDAY_CONSOLIDATION OFF_HOURS
   TradingSessionClassifier   .classify(Instant) → TradingSession (IST-aware)
+  DirectionalBias.java       enum: STRONG_BULLISH BULLISH NEUTRAL BEARISH STRONG_BEARISH  (Phase 33)
   CalmTrajectory.java        ASCENDING / PLATEAU / DESCENDING
   DivergenceTrajectory.java  CONVERGING / STABLE / DIVERGING
   StabilityPressureCalculator
@@ -278,6 +300,8 @@ service/
 replay/  (profile: historical-replay)
   HistoricalReplayProvider   @Primary @Profile, cursor-based real OHLCV
   ReplayRunnerService        fetchAndStoreHistory(), startReplay(), stopReplay(), reset()
+                             Phase 34: sends X-Replay-Mode: true header on each trigger POST
+                             Phase 34: PIPELINE_SETTLE_MS = 500ms (reduced from 1500ms)
   ReplayController           REST /api/v1/market-data/replay/*
   ReplayState.java           IDLE/RUNNING/COMPLETE/ERROR, progress fields
   ReplayCandleDTO.java       local mirror of history-service DTO
@@ -293,10 +317,14 @@ resources/
 agent/
   AnalysisAgent.java         interface
   TrendAgent.java            SMA crossover, RSI, momentum signals
+                             Phase 33: 5-vote directional bias (trend, MACD, price>SMA20,
+                             price>EMA12, 5-candle momentum) → DirectionalBias enum name
+                             stored in metadata["directionalBias"]
   RiskAgent.java             volatility, drawdown signals
   PortfolioAgent.java        allocation, diversification signals
   DisciplineCoach.java       @Profile("!test"), calls Claude Haiku via Anthropic API
                              runs on Schedulers.boundedElastic() (blocking)
+                             NOTE: still runs during replay (analysis-engine receives no replay flag)
 service/
   AgentDispatchService.java  parallel dispatch: Flux.merge(all 4 agents) → collectList()
 controller/
@@ -310,19 +338,30 @@ indicator/
 service/
   OrchestratorService.java   main pipeline: MarketDataEvent → FinalDecision
                              flow: fetchMarketData → classifyRegime → classifySession
-                               → analysisEngine → weights → feedback → AI → DivergenceGuard
-                               → buildDecision → publish → resolveOpenOutcomes (fire-forget)
+                               → analysisEngine → extractDirectionalBias (Phase 33)
+                               → weights → feedback → [if !replayMode: fetchStrategyMemory → AI]
+                               → [if replayMode: consensus direct]
+                               → DivergenceGuard → buildDecision → publish
+                               → resolveOpenOutcomes (fire-forget)
+                             Phase 33: extracts metadata["directionalBias"] from TrendAgent result
+                             Phase 34: orchestrate(event, replayMode) — replayMode skips
+                               fetchStrategyMemory(), aiStrategistService.evaluate(),
+                               sets divergenceStreak=0; uses ConsensusIntegrationGuard directly
 ai/
   AIStrategistService.java   Claude API call (Sonnet or Haiku per ModelSelector)
                              builds prompt from DecisionContext + strategy memory
+                             Phase 33: bias section in prompt; parseResponse() extracts tradeDirection
   ModelSelector.java         VOLATILE→Haiku, others→Sonnet
 adapter/
   PerformanceWeightAdapter   GET /agent-performance from history-service
   AgentFeedbackAdapter       GET /agent-feedback from history-service
 guard/
   ConsensusIntegrationGuard  validates AI vs consensus before persistence
+                             used directly (bypassing AI) in replayMode
 controller/
   OrchestratorController.java POST /api/v1/orchestrate/trigger
+                             Phase 34: reads @RequestHeader X-Replay-Mode (default false)
+                             passes boolean replayMode to OrchestratorService.orchestrate()
 publisher/
   RestDecisionEventPublisher POST /save to history-service, POST /decision to notification-service
 logger/
@@ -332,14 +371,18 @@ logger/
 ### history-service
 ```
 model/
-  DecisionHistory.java       @Table("decision_history"), 25+ fields with Lombok @Data
+  DecisionHistory.java       @Table("decision_history"), 27+ fields with Lombok @Data
+                             Phase 33: +tradeDirection, +directionalBias
+                             Phase 34: +decisionMode (LIVE_AI | REPLAY_CONSENSUS_ONLY)
   AgentPerformanceSnapshot   @Table("agent_performance_snapshot")
   DecisionMetricsProjection  @Table("decision_metrics_projection")
   TradeSession.java          @Table("trade_sessions")
   ReplayCandle.java          @Table("replay_candles") — Phase-32
 repository/
   DecisionHistoryRepository  findLatestPerSymbol(), findReplayCandles(), findUnresolvedSignals()
-                             findRecentBySymbol(), findResolvedDecisions(limit)
+                             findRecentBySymbol()
+                             findResolvedDecisions(limit) — Phase 34: filters
+                               AND (decision_mode IS NULL OR decision_mode = 'LIVE_AI')
   AgentPerformanceSnapshotRepository  upsertAgent(), normalizeLatencyWeights()
   DecisionMetricsProjectionRepository upsertMetrics()
   ReplayCandleRepository     findBySymbolOrderByCandleTimeAsc(), deleteBySymbol(), countBySymbol()
@@ -348,30 +391,47 @@ service/
                              getLatestSnapshot(), streamSnapshots() (Sinks.Many SSE),
                              getEdgeReport(), getFeedbackLoopStatus(), getRecentDecisions(),
                              recordOutcome(), resolveOutcomes(), rescoreAgentsByOutcome()
+                             Phase 33: maps tradeDirection + directionalBias from FinalDecision
+                             Phase 34: maps metadata["decision_mode"] → entity.decisionMode;
+                               defaults to "LIVE_AI" when not present
   ReplayCandleService.java   ingest(), getCandles(), getCount(), deleteBySymbol()
 controller/
   HistoryController.java     all /api/v1/history/* endpoints
 dto/
   SnapshotDecisionDTO        symbol, finalSignal, confidence, marketRegime, divergenceFlag,
                              aiReasoning, savedAt, tradingSession, entryPrice, targetPrice,
-                             stopLoss, estimatedHoldMinutes
+                             stopLoss, estimatedHoldMinutes,
+                             tradeDirection, directionalBias  (Phase 33)
   EdgeReportDTO              n, winRate, avgGain, avgLoss, rr, expectancy, maxDD,
                              session win rates (OB/PH/MD), stability rates, confidence rates
   FeedbackLoopStatusDTO      agentName, winRate, sampleSize, accuracyScore, source
   RecentDecisionMemoryDTO    finalSignal, confidenceScore, divergenceFlag, marketRegime
   ReplayCandleDTO            symbol, candleTime, open, high, low, close, volume
+resources/
+  schema.sql                 Phase 33: trade_direction VARCHAR(10), directional_bias VARCHAR(20)
+                             Phase 34: decision_mode VARCHAR(30)
 ```
 
 ### scheduler-service
 ```
 job/
   MarketDataScheduler.java   @PostConstruct → per-symbol adaptive loop
-                             loop: delay → POST /orchestrate/trigger → GET /latest-regime → repeat
+                             loop: delay → [isReplayRunning? skip : POST /orchestrate/trigger]
+                               → GET /latest-regime → repeat
+                             Phase 34: isReplayRunning() — GET /api/v1/market-data/replay/status
+                               → if RUNNING, skips live trigger for that cycle
 strategy/
   AdaptiveTempoStrategy.java OFF_HOURS=30min, MIDDAY=15min
                              CALM=10min, RANGING=5min, TRENDING=2min, VOLATILE=30s
 client/
   HistoryClient.java         GET /api/v1/history/latest-regime?symbol=
+                             Phase 34: @Qualifier("historyWebClient") on constructor injection
+config/
+  SchedulerConfig.java       Phase 34: @Bean("marketDataClient"), @Bean("orchestratorClient"),
+                             @Bean("historyWebClient") with @Qualifier to resolve WebClient
+                             bean ambiguity in Spring context
+resources/
+  application.yml            Phase 34: services.market-data.base-url added for replay status endpoint
 config: scheduler.symbols=${WATCHED_SYMBOLS:-NIFTYBEES.BSE}
 ```
 
@@ -401,12 +461,15 @@ App.jsx                      main layout: header + panels + modals
                              auto-refresh: 30s countdown
 components/
   SnapshotCard.jsx           per-symbol signal card
+                             Phase 33: DirectionBadge (↑ LONG / ↓ SHORT / — FLAT) + bias label
   DetailModal.jsx            expanded view + trade start/exit
+                             Phase 33: tradeDirection row + directionalBias row
   MomentumBanner.jsx         market state banner
   TacticalPostureHeader.jsx  active trade awareness
   TradeReflectionPanel.jsx   collapsible trade history
   FeedbackLoopPanel.jsx      collapsible agent win-rate table
   ReplayPanel.jsx            Phase-32 replay controls + progress + post-replay weights
+vite.config.js               Phase 34.1: proxy targets updated 9085→8085, 9086→8086
 ```
 
 ---
@@ -439,6 +502,8 @@ ANTHROPIC_API_KEY   → Claude API
 ORCHESTRATOR_URL    → agent-orchestrator   (POST /orchestrate/trigger)
 HISTORY_URL         → history-service      (GET /latest-regime)
 WATCHED_SYMBOLS     → default NIFTYBEES.BSE
+# Phase 34 addition:
+services.market-data.base-url → market-data-service (GET /replay/status — replay gate check)
 ```
 
 ### trade-service
@@ -455,31 +520,69 @@ POSTGRES_R2DBC_URL  → postgres (R2DBC reactive)
 ### market-data-service (historical-replay profile)
 ```
 HISTORY_URL         → history-service      (POST /replay-candles/ingest, GET /replay-candles/*, GET /snapshot)
-ORCHESTRATOR_URL    → agent-orchestrator   (POST /orchestrate/trigger)
+ORCHESTRATOR_URL    → agent-orchestrator   (POST /orchestrate/trigger, with X-Replay-Mode: true header)
 ANGELONE_API_KEY, ANGELONE_CLIENT_ID, ANGELONE_PASSWORD, ANGELONE_TOTP_SECRET
 ```
+
+---
+
+## Scripts
+
+### scripts/load_nifty_candles.py
+Loads Yahoo Finance NIFTY50 5-minute candles directly into the `replay_candles` table (bypassing Angel One). Useful for seeding replay data without Angel One API credentials.
+
+```
+DB_PORT = 5432   (Phase 34.1: updated from 9432)
+Target table: replay_candles
+Symbol: configurable (default NIFTY50 / ^NSEI)
+Interval: 5m
+```
+
+Usage: `python scripts/load_nifty_candles.py`
 
 ---
 
 ## Key Patterns
 
 ### Orchestrator pipeline (OrchestratorService.orchestrate)
+
+**Live mode** (`X-Replay-Mode` header absent or `false`):
 ```
 MarketDataEvent
-  → fetchMarketDataAndBuildContext()   // GET /quote → Context
-  → MarketRegimeClassifier.classify()  // CALM/RANGING/TRENDING/VOLATILE
-  → TradingSessionClassifier.classify()// OPENING_BURST/POWER_HOUR/MIDDAY/OFF_HOURS
-  → resolveOpenOutcomes() [fire-forget]// POST /resolve-outcomes/{symbol}
-  → callAnalysisEngine()               // POST /analyze → List<AnalysisResult>
+  → fetchMarketDataAndBuildContext()         // GET /quote → Context
+  → MarketRegimeClassifier.classify()        // CALM/RANGING/TRENDING/VOLATILE
+  → TradingSessionClassifier.classify()      // OPENING_BURST/POWER_HOUR/MIDDAY/OFF_HOURS
+  → resolveOpenOutcomes() [fire-forget]      // POST /resolve-outcomes/{symbol}
+  → callAnalysisEngine()                     // POST /analyze → List<AnalysisResult>
+  → extractDirectionalBias()                 // from TrendAgent metadata["directionalBias"] (Phase 33)
   → PerformanceWeightAdapter.fetchPerformanceWeights()  // GET /agent-performance
   → AgentFeedbackAdapter.fetchFeedback()               // GET /agent-feedback
-  → AgentScoreCalculator.compute()     // adaptive weights
-  → DecisionContext.assemble() + enrichments (Omega, Reflection)
-  → fetchStrategyMemory()              // GET /recent/{symbol}?limit=3
-  → AIStrategistService.evaluate()     // Claude API → AIStrategyDecision
-  → DivergenceGuard.evaluate()         // may override signal or dampen confidence
-  → buildDecision()                    // FinalDecision v8
-  → decisionEventPublisher.publish()   // POST /save + POST /notify/decision
+  → AgentScoreCalculator.compute()           // adaptive weights
+  → DecisionContext.assemble() + withCalmOmega() + withReflection() + withDirectionalBias() (Phase 33)
+  → fetchStrategyMemory()                    // GET /recent/{symbol}?limit=3
+  → AIStrategistService.evaluate()           // Claude API → AIStrategyDecision (incl. tradeDirection, Phase 33)
+  → DivergenceGuard.evaluate()               // may override signal or dampen confidence
+  → buildDecision()                          // FinalDecision v9 (Phase 33: +tradeDirection, +directionalBias)
+  → decisionEventPublisher.publish()         // POST /save (decision_mode=LIVE_AI) + POST /notify/decision
+```
+
+**Replay mode** (`X-Replay-Mode: true` header present — Phase 34):
+```
+MarketDataEvent (from ReplayRunnerService trigger)
+  → fetchMarketDataAndBuildContext()         // HistoricalReplayProvider (cursor-based OHLCV)
+  → MarketRegimeClassifier.classify()
+  → TradingSessionClassifier.classify()
+  → resolveOpenOutcomes() [fire-forget]
+  → callAnalysisEngine()                     // POST /analyze → List<AnalysisResult>
+                                             // (DisciplineCoach still runs in analysis-engine)
+  → extractDirectionalBias()
+  → PerformanceWeightAdapter + AgentFeedbackAdapter + AgentScoreCalculator
+  → DecisionContext.assemble() + enrichments
+  → [SKIP fetchStrategyMemory()]             // no strategy memory in replay
+  → [SKIP AIStrategistService.evaluate()]    // no Claude API call in replay; divergenceStreak=0
+  → ConsensusIntegrationGuard directly       // consensus-only decision
+  → buildDecision()                          // FinalDecision v9
+  → decisionEventPublisher.publish()         // POST /save (decision_mode=REPLAY_CONSENSUS_ONLY)
 ```
 
 ### Agent win rate / feedback loop
@@ -497,14 +600,18 @@ OFF_HOURS: HOLD only
 ```
 Implemented in `TradingSessionClassifier.classify(Instant)` — UTC-aware, converts to IST internally.
 
-### Phase-32 Replay loop (ReplayRunnerService)
+### Phase-32/34 Replay loop (ReplayRunnerService)
+
+Phase 34 changes: `PIPELINE_SETTLE_MS` reduced from 1500ms → 500ms; `X-Replay-Mode: true` header sent on each trigger; live scheduler skips triggers while replay RUNNING.
+
 ```
 loadCandlesFromHistory(symbol)          // GET /replay-candles/{symbol}
 provider.loadCandles(symbol, candles)   // into HistoricalReplayProvider memory
 for each candle[i]:
   provider.setCursor(symbol, i)         // set before trigger
-  POST /orchestrate/trigger { symbol, candle[i].candleTime as triggeredAt, uuid traceId }
-  Thread.sleep(2000)
+  POST /orchestrate/trigger             // with header: X-Replay-Mode: true
+    { symbol, candle[i].candleTime as triggeredAt, uuid traceId }
+  Thread.sleep(500)                     // PIPELINE_SETTLE_MS = 500ms (Phase 34)
   GET /history/snapshot → filter symbol → finalSignal, entryPrice, estimatedHoldMinutes
   if BUY/SELL:
     exitIdx = min(i + holdMinutes/5, candles.size()-1)
@@ -512,7 +619,12 @@ for each candle[i]:
     if SELL: outcome = -outcome
     POST /history/outcome/{traceId} { outcomePercent, holdMinutes }
     → triggers rescoreAgentsByOutcome() → adaptive weights update immediately
+    → decision_history row tagged decision_mode = 'REPLAY_CONSENSUS_ONLY'
+    → excluded from findResolvedDecisions() agent win-rate computation (Phase 34.4)
 ```
+
+**Effective throughput:** ~2s per candle (500ms settle + ~1.5s analysis-engine parallel dispatch).
+**8,400 candles (60 days):** ~4.5–5 hours wall-clock time.
 
 ### Angel One auth (AngelOneAuthService)
 - Cached JWT token (refreshed on expiry or 401)
@@ -530,6 +642,69 @@ Rule 2 (DAMPEN):    moderate divergence → aiConfidence × 0.80, floor 0.50
 aiReasoning gets "[OVERRIDE: ...]" or "[OVERRIDE: ConfidenceDampen ...]" appended
 divergenceFlag = pre-override disagreement (never changed by guard)
 ```
+
+### Directional Bias Architecture (Phase 33)
+
+TrendAgent computes a 5-vote majority to produce a `DirectionalBias`. The bias flows through the pipeline and enforces LONG/SHORT gating in the AI prompt.
+
+**5-vote computation (TrendAgent):**
+
+| Vote | Condition | Bullish |
+|---|---|---|
+| Trend | Recent price slope positive | Yes |
+| MACD histogram | Histogram > 0 | Yes |
+| Price vs SMA20 | `latestClose > SMA20` | Yes |
+| Price vs EMA12 | `latestClose > EMA12` | Yes |
+| 5-candle momentum | Last 5 closes trending up | Yes |
+
+Vote count → DirectionalBias: 5=STRONG_BULLISH, 4=BULLISH, 2-3=NEUTRAL, 1=BEARISH, 0=STRONG_BEARISH.
+
+**Pipeline flow:**
+```
+TrendAgent → metadata["directionalBias"] = "BULLISH"
+  → OrchestratorService.extractDirectionalBias() → DirectionalBias.valueOf(...)
+  → DecisionContext.withDirectionalBias(bias)
+  → AIStrategistService.buildPrompt() injects bias section:
+      "Only generate BUY/LONG when bias is BULLISH or STRONG_BULLISH.
+       Only generate SELL/SHORT when bias is BEARISH or STRONG_BEARISH.
+       NEUTRAL → prefer HOLD or WATCH."
+  → AI returns tradeDirection (LONG/SHORT/FLAT) in JSON response
+  → FinalDecision v9: tradeDirection + directionalBias persisted
+  → SnapshotDecisionDTO: both fields surfaced to UI
+```
+
+**UI display:**
+
+| tradeDirection | Badge |
+|---|---|
+| LONG | ↑ LONG (green) |
+| SHORT | ↓ SHORT (red) |
+| FLAT | — FLAT (neutral) |
+
+### Replay Mode Architecture (Phase 34)
+
+Replay mode isolates historical replay runs from live production concerns:
+
+| Concern | Mechanism |
+|---|---|
+| Scheduler silence | `MarketDataScheduler.isReplayRunning()` — polls `GET /replay/status`; skips live trigger if `RUNNING` |
+| AI cost + rate limits | `X-Replay-Mode: true` header → `OrchestratorService` skips `fetchStrategyMemory()` + `AIStrategistService.evaluate()`. DisciplineCoach still runs (analysis-engine is not replay-aware). |
+| Data isolation | `decision_mode = 'REPLAY_CONSENSUS_ONLY'` tagged on all replay saves. `findResolvedDecisions()` WHERE clause excludes these rows from agent win-rate computation. |
+| Throughput | 500ms settle + ~1.5s analysis-engine dispatch ≈ 2s/candle. 8,400 candles ≈ 4.5–5 hours. |
+
+**Replay decision path (simplified):**
+```
+ReplayRunnerService → POST /trigger + X-Replay-Mode:true
+  → OrchestratorService (replayMode=true):
+      analysis-engine runs (4 agents including DisciplineCoach)
+      consensus computed directly (no AI)
+      FinalDecision built with decision_mode=REPLAY_CONSENSUS_ONLY in metadata
+  → HistoryService.save() tags decision_mode=REPLAY_CONSENSUS_ONLY
+```
+
+**Live decision path after replay:**
+- `findResolvedDecisions()` only returns rows where `decision_mode IS NULL OR decision_mode = 'LIVE_AI'`
+- Agent win rates and EdgeReport reflect only real AI-driven production decisions
 
 ### SSE push (history-service)
 ```java

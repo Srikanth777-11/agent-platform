@@ -72,6 +72,7 @@ public interface DecisionHistoryRepository extends ReactiveCrudRepository<Decisi
           AND agents IS NOT NULL
           AND outcome_percent IS NOT NULL
           AND final_signal IN ('BUY', 'SELL')
+          AND (decision_mode IS NULL OR decision_mode = 'LIVE_AI')
         ORDER BY saved_at DESC
         LIMIT :limit
         """)
