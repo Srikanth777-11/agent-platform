@@ -244,6 +244,26 @@ UNIQUE(symbol, candle_time)
 INDEX: (symbol, candle_time ASC)
 ```
 
+### edge_conditions  (Phase-38a — WinConditionRegistry)
+```sql
+id               BIGSERIAL PK,
+trading_session  VARCHAR(30)  NOT NULL,   -- OPENING_BURST / POWER_HOUR / etc.
+market_regime    VARCHAR(20)  NOT NULL,   -- VOLATILE / TRENDING / RANGING / CALM
+directional_bias VARCHAR(20)  NOT NULL,   -- BULLISH / STRONG_BEARISH / etc.
+signal           VARCHAR(10)  NOT NULL,   -- BUY / SELL
+win_count        INTEGER      DEFAULT 0,
+loss_count       INTEGER      DEFAULT 0,
+total_count      INTEGER      DEFAULT 0,
+win_rate         DOUBLE       DEFAULT 0.0,
+last_updated     TIMESTAMP    DEFAULT NOW(),
+UNIQUE (trading_session, market_regime, directional_bias, signal)
+```
+
+**Purpose:** Passive statistical learning. Tracks win/loss outcomes per unique trade setup key.
+- Only `LIVE_AI` decisions populate this table — `REPLAY_CONSENSUS_ONLY` excluded
+- Phase-38b will activate a gate: conditions with `total_count < 20` OR `win_rate < 0.52` → WATCH
+- Win rate computed inline on each UPSERT: `(win_count + :win) / (total_count + 1)`
+
 ---
 
 ## Key File Map
@@ -324,11 +344,16 @@ agent/
   PortfolioAgent.java        allocation, diversification signals
   DisciplineCoach.java       @Profile("!test"), calls Claude Haiku via Anthropic API
                              runs on Schedulers.boundedElastic() (blocking)
-                             NOTE: still runs during replay (analysis-engine receives no replay flag)
+                             Phase 34: skipped in replay when replayMode=true
 service/
-  AgentDispatchService.java  parallel dispatch: Flux.merge(all 4 agents) → collectList()
+  AgentDispatchService.java  Phase 34: dispatchAll(context, replayMode)
+                             when replayMode=true: filters out DisciplineCoach, dispatches 3 agents
+                             → List<AnalysisAgent> activeAgents = replayMode
+                                ? agents.stream().filter(a -> !"DisciplineCoach".equals(a.agentName())).toList()
+                                : agents;
 controller/
   AnalysisController.java    POST /api/v1/analyze (Context → List<AnalysisResult>)
+                             Phase 34: reads @RequestHeader X-Replay-Mode → passes to dispatchAll()
 indicator/
   TechnicalIndicators.java   SMA, RSI, MACD helpers
 ```
@@ -347,10 +372,27 @@ service/
                              Phase 34: orchestrate(event, replayMode) — replayMode skips
                                fetchStrategyMemory(), aiStrategistService.evaluate(),
                                sets divergenceStreak=0; uses ConsensusIntegrationGuard directly
+                             Phase 35: buildDecision() has 5 hard gates (in order):
+                               Gate 1 AuthorityChain — consensus override blocked unless WATCH/HOLD
+                               Gate 2 SessionGate    — MIDDAY/OFF_HOURS BUY+SELL → WATCH
+                               Gate 3 BiasGate       — BUY in BEARISH → WATCH; SELL in BULLISH → WATCH
+                               Gate 4 DivergencePenalty — divergenceFlag → confidence×0.85;
+                                                           streak≥2 → WATCH
+                               Gate 5 MultiFilter    — BUY/SELL needs confidence≥0.65
+                                                        + !divergenceFlag + sessionActive
+                             Phase 36: Gate 6 EligibilityGuard (after Gate 5, before FinalDecision)
+                               BUY: session∈{OB,PH} + regime∈{VOLATILE,TRENDING}
+                                    + bias∈{BULLISH,STRONG_BULLISH} + conf≥0.65 + !divergence
+                               SELL: session=OB + regime=VOLATILE
+                                     + bias∈{BEARISH,STRONG_BEARISH} + conf≥0.65 + !divergence
+                               Else → WATCH
 ai/
   AIStrategistService.java   Claude API call (Sonnet or Haiku per ModelSelector)
                              builds prompt from DecisionContext + strategy memory
                              Phase 33: bias section in prompt; parseResponse() extracts tradeDirection
+                             Phase 37: SELL bias corrected — BEARISH rules symmetric with BULLISH
+                               session gating removed from prompt (single source of truth = code gates)
+                               "Both BUY and SELL are valid signals. Match signal to directional bias."
   ModelSelector.java         VOLATILE→Haiku, others→Sonnet
 adapter/
   PerformanceWeightAdapter   GET /agent-performance from history-service
@@ -378,6 +420,9 @@ model/
   DecisionMetricsProjection  @Table("decision_metrics_projection")
   TradeSession.java          @Table("trade_sessions")
   ReplayCandle.java          @Table("replay_candles") — Phase-32
+  EdgeCondition.java         @Table("edge_conditions") — Phase-38a
+                             fields: tradingSession, marketRegime, directionalBias, signal,
+                             winCount, lossCount, totalCount, winRate, lastUpdated
 repository/
   DecisionHistoryRepository  findLatestPerSymbol(), findReplayCandles(), findUnresolvedSignals()
                              findRecentBySymbol()
@@ -386,6 +431,8 @@ repository/
   AgentPerformanceSnapshotRepository  upsertAgent(), normalizeLatencyWeights()
   DecisionMetricsProjectionRepository upsertMetrics()
   ReplayCandleRepository     findBySymbolOrderByCandleTimeAsc(), deleteBySymbol(), countBySymbol()
+  EdgeConditionRepository    Phase-38a: upsertCondition(session, regime, bias, signal, win, loss)
+                             atomic UPSERT: increments win/loss counts, recomputes win_rate inline
 service/
   HistoryService.java        save(), getAgentFeedback(), getAgentPerformance(),
                              getLatestSnapshot(), streamSnapshots() (Sinks.Many SSE),
@@ -394,6 +441,14 @@ service/
                              Phase 33: maps tradeDirection + directionalBias from FinalDecision
                              Phase 34: maps metadata["decision_mode"] → entity.decisionMode;
                                defaults to "LIVE_AI" when not present
+                             Phase 38a: after rescoreAgentsByOutcome()
+                               → .then(winConditionRegistry.record(saved))
+  WinConditionRegistryService.java  Phase-38a: record(DecisionHistory d)
+                             — skips if decision_mode != "LIVE_AI"
+                             — skips WATCH/HOLD (no outcome to learn from)
+                             — skips if session/regime/bias null or outcome null
+                             — calls edgeConditionRepository.upsertCondition(...)
+                             — non-fatal: errors logged and swallowed
   ReplayCandleService.java   ingest(), getCandles(), getCount(), deleteBySymbol()
 controller/
   HistoryController.java     all /api/v1/history/* endpoints
@@ -410,6 +465,7 @@ dto/
 resources/
   schema.sql                 Phase 33: trade_direction VARCHAR(10), directional_bias VARCHAR(20)
                              Phase 34: decision_mode VARCHAR(30)
+                             Phase 38a: edge_conditions table (see schema section below)
 ```
 
 ### scheduler-service
@@ -713,3 +769,87 @@ Sinks.Many<SnapshotDecisionDTO> snapshotSink = Sinks.many().multicast().onBackpr
 // GET /stream → snapshotSink.asFlux() → ServerSentEvent with event:"snapshot"
 // UI: new EventSource('/api/v1/history/stream') → es.addEventListener('snapshot', handler)
 ```
+
+---
+
+## Phase 35-38a: Decision Gate Architecture
+
+### Gate execution order in `OrchestratorService.buildDecision()`
+
+```
+DivergenceGuard.evaluate()              ← existing (Phase 8)
+  ↓
+Gate 1: Phase-35 AuthorityChain
+  — consensus override allowed only if result is WATCH or HOLD
+  — if override would make signal ACTIVE (BUY/SELL) → revert to AI signal
+  ↓
+Gate 2: Phase-35 SessionGate
+  — MIDDAY_CONSOLIDATION or OFF_HOURS → BUY/SELL forced to WATCH
+  ↓
+Gate 3: Phase-35 BiasGate
+  — BUY + (BEARISH or STRONG_BEARISH) → WATCH
+  — SELL + (BULLISH or STRONG_BULLISH) → WATCH
+  ↓
+Gate 4: Phase-35 DivergencePenalty
+  — divergenceFlag=true → workingConfidence × 0.85
+  — divergenceStreak ≥ 2 → force WATCH
+  ↓
+Gate 5: Phase-35 MultiFilter
+  — BUY/SELL blocked if: confidence < 0.65 OR divergenceFlag OR !sessionActive
+  ↓
+Gate 6: Phase-36 EligibilityGuard
+  BUY: session ∈ {OB, PH} + regime ∈ {VOLATILE, TRENDING}
+       + bias ∈ {BULLISH, STRONG_BULLISH} + conf ≥ 0.65 + !divergence
+  SELL: session = OB + regime = VOLATILE
+        + bias ∈ {BEARISH, STRONG_BEARISH} + conf ≥ 0.65 + !divergence
+  Anything else → WATCH
+  ↓
+FinalDecision.v9()                      ← persistence
+```
+
+### Hard rules enforced by gates
+- AI can only be overridden **downward** (to WATCH/HOLD) — never upgraded to BUY/SELL by consensus
+- MIDDAY and OFF_HOURS produce **zero** BUY/SELL trades (regardless of AI signal)
+- Trades require **regime confirmation** — RANGING/CALM markets are filtered out
+- **Positive bias required for BUY** — can't buy into a downtrend
+- **Negative bias required for SELL** — can't short into an uptrend
+
+### Phase-38a WinConditionRegistry pattern
+
+```
+resolveOutcomes(symbol, currentPrice)
+  → for each unresolved BUY/SELL within last 10 min:
+      compute outcome_percent = (currentPrice - entryPrice) / entryPrice × 100
+      repository.save(d)  ← marks outcome_resolved = true
+      → rescoreAgentsByOutcome()   ← agent learning (Phase 31)
+      → winConditionRegistry.record(saved)  ← Phase 38a
+
+WinConditionRegistryService.record(d):
+  if d.decisionMode != "LIVE_AI" → skip (replay rows excluded)
+  if signal not in {BUY, SELL}   → skip
+  if any key field null           → skip
+  win = (outcomePercent > 0) ? 1 : 0
+  edgeConditionRepository.upsertCondition(session, regime, bias, signal, win, loss)
+  → atomic UPSERT: increments counts, recomputes win_rate inline
+```
+
+### Phase-37 AI prompt structure (AIStrategistService.buildPrompt)
+
+```
+[System role — quantitative trading strategist]
+Symbol / Regime / Latest Close
+Agent Signals (with adaptive weights)
+[Optional] Calm Omega trajectory   (non-VOLATILE only)
+[Optional] Architect Reflection    (non-VOLATILE only)
+[Optional] Calm Operator Mood      (non-VOLATILE only)
+Trading Session          ← informational only (Phase 37: removed hard "Do NOT" rules)
+Directional Bias         ← SYMMETRIC: SELL in BEARISH = BUY in BULLISH (Phase 37 fix)
+[Optional] Strategy Memory (last 3 decisions)
+"Determine correct trade direction..."
+Trade Direction Clarification  ← both BUY and SELL shown as equally valid
+JSON response format
+```
+
+**Phase 37 key change:** Before Phase 37, the AI prompt told Claude "Respond WATCH or HOLD only" for MIDDAY sessions. After Phase 37, the prompt is informational only — gate enforcement lives entirely in code (single source of truth).
+
+**Phase 37 SELL bias fix:** Before, BEARISH bias rules used "Prefer SELL... Avoid BUY" (weak). After, they say "Signal SELL. The market is trending down. BUY is incorrect in this direction." (equally assertive as BULLISH rules).

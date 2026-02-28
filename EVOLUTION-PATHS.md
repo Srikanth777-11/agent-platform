@@ -805,20 +805,27 @@ Replace `RestDecisionEventPublisher` with `KafkaDecisionPublisher`. `Orchestrato
 | 12. Divergence Safety Override | MEDIUM | ✅ DONE (Phase 29+30) | common-lib + orchestrator | No |
 | 13. Database Indexing | LOW | ✅ PARTIAL | history-service schema only | No |
 | 14. Real-Time UI (SSE) | LOW | ✅ DONE | history-service + UI | No |
+| Phase 35. Authority Chain + Hard Gates | LOW | ✅ DONE | orchestrator only | No |
+| Phase 36. TradeEligibilityGuard | LOW | ✅ DONE | orchestrator only | No |
+| Phase 37. AI Prompt SELL Fix | LOW | ✅ DONE | orchestrator/ai only | No |
+| Phase 38a. WinConditionRegistry Passive | LOW | ✅ DONE | history-service only | No |
+| Phase 38b. WinConditionRegistry Active | MEDIUM | ⏳ BLOCKED (Angel One data) | history-service + orchestrator | No |
 
 ### Recommended Execution Order (Remaining Paths)
 
 Paths 1, 9, 12, and the Phase 34 infrastructure stabilization are complete. The system now has adaptive consensus, AI memory, divergence safety logic, directional bias gating, and clean infrastructure (single stack, replay isolation) active.
 
-**Next evolution must be data-driven, not speculative.** Run the system, collect divergence frequency, measure override frequency, measure average dampening impact — then decide. The remaining paths in priority order once data is available:
+**Current state (Phase 38a complete):** Phases 35-38a complete. The system has structural discipline gates, directional eligibility enforcement, symmetric SELL bias, and passive statistical learning active. The next evolution is data-driven.
 
-1. **Phase 35: Authority Chain + Hard Gates** — prevent invalid LONG/SHORT from reaching persistence; hard guard on tradeDirection vs directionalBias consistency
-2. **Phase 36: TradeEligibilityGuard** — pre-trade eligibility check; session + bias + regime gate before any BUY/SELL enters execution path
-3. **Path 8: Regime Memory** — smooths scheduling transitions (LOW risk, scheduler-only)
-4. **Path 11: DecisionContext Persistence** — architectural cleanup, non-urgent (LOW risk)
+**Remaining roadmap:**
+
+1. **Phase 38b: WinConditionRegistry Active** — BLOCKED on Angel One 6-month data. Activate when `edge_conditions` has ≥20 samples per condition.
+2. **Paper trading (2 weeks minimum)** — After Angel One live, before live capital.
+3. **Path 8: Regime Memory** — smooths scheduling transitions (LOW risk, scheduler-only, any time)
+4. **Path 11: DecisionContext Persistence** — architectural cleanup (LOW risk, non-urgent)
 5. **Path 13 (remaining): trace_id index + partitioning** — prerequisite for long-term operation
-6. **Path 7: Kafka Streaming** — infrastructure upgrade, deferred until scale demands it
-7. **Path 10: Multi-Model Cross-Validation** — research path, cost and latency implications
+6. **Path 7: Kafka Streaming** — deferred until scale demands it
+7. **Path 10: Multi-Model Cross-Validation** — research path, cost implications
 
 ---
 
@@ -1648,53 +1655,155 @@ After Phase 34:
 
 ---
 
-## Phase 35 — Authority Chain + Hard Gates (PLANNED)
+## Phase 35 — Authority Chain + Hard Gates ✅ COMPLETED 2026-02-28
 
-**Goal:** Prevent directionally invalid decisions from reaching persistence. A hard gate checks that the `tradeDirection` emitted by the AI Strategist is consistent with the `directionalBias` from TrendAgent. A LONG signal with BEARISH/STRONG_BEARISH bias, or a SHORT signal with BULLISH/STRONG_BULLISH bias, is overridden to FLAT before persistence.
+**Goal:** Enforce structural decision discipline. Five hard gates in `OrchestratorService.buildDecision()` after `DivergenceGuard`, before `FinalDecision`. AI authority preserved — overrides only allowed downward (to WATCH/HOLD, never upward to BUY/SELL).
 
-**Scope:** `agent-orchestrator` (`OrchestratorService` or new `AuthorityChainGuard` class). No schema changes required (tradeDirection already persisted).
+**Replay result:** 434 resolved trades (↓87% from 3,273), MIDDAY=0, win rate 49.1%, SELL=0 (expected in consensus-only replay).
 
-**Risk level:** LOW-MEDIUM. Pure additive guard; does not modify upstream AI call or consensus computation.
+### Gate 1 — Authority Chain
+Consensus override blocked unless it produces WATCH or HOLD. If the override would produce an active BUY/SELL signal, revert to the AI's original signal. Ensures AI remains the primary decision authority — consensus can only downgrade, never upgrade.
 
----
+### Gate 2 — SessionGate
+`MIDDAY_CONSOLIDATION` or `OFF_HOURS` sessions: any BUY or SELL signal forced to WATCH. Session gate firing logged at INFO level: `[Phase35-SessionGate]`.
 
-## Phase 36 — TradeEligibilityGuard (PLANNED)
+### Gate 3 — BiasGate
+- BUY signal + BEARISH or STRONG_BEARISH directionalBias → WATCH
+- SELL signal + BULLISH or STRONG_BULLISH directionalBias → WATCH
 
-**Goal:** A composite pre-trade eligibility check that gates entry on multiple conditions simultaneously: active trading session (OPENING_BURST or POWER_HOUR), directional bias aligned with signal, and regime not VOLATILE (or explicit VOLATILE permission). Prevents the AI from recommending a LONG in OFF_HOURS with BEARISH bias.
+Prevents counter-trend entries regardless of AI confidence.
 
-**Scope:** New `TradeEligibilityGuard` in `common-lib/guard` or `agent-orchestrator/guard`. Evaluated in `OrchestratorService.buildDecision()` after DivergenceGuard.
+### Gate 4 — DivergencePenalty
+- If `divergenceFlag = true`: `workingConfidence × 0.85`
+- If `divergenceStreak ≥ 2`: force WATCH (persistent disagreement = no confidence)
 
-**Risk level:** LOW. Purely additive. Session gating already exists in AI prompt layer — this adds a deterministic enforcement layer below the AI.
+### Gate 5 — MultiFilter
+BUY or SELL blocked if ANY of:
+- `workingConfidence < 0.65`
+- `divergenceFlag = true`
+- Session not in {OPENING_BURST, POWER_HOUR}
 
----
-
-## Phase 37 — AI Prompt Adjustment (PLANNED)
-
-**Goal:** Refine AI prompt structure based on data collected from Phase 34 replay runs and Phase 35-36 guard activations. Adjustments may include: tightening bias-override language, adding confidence penalty for NEUTRAL-bias BUY/SELL recommendations, and tuning the DivergenceGuard thresholds based on empirical override frequency.
-
-**Scope:** `agent-orchestrator/ai/AIStrategistService.java` prompt construction. No schema, pipeline, or interface changes.
-
-**Risk level:** LOW. Prompt-only changes. Behavior observable via existing `aiReasoning` field.
-
----
-
-## Phase 38a — WinConditionRegistry (Passive) (PLANNED)
-
-**Goal:** Build a registry that tracks which combinations of (session, regime, directionalBias, tradeDirection) produce profitable outcomes — without yet acting on it. This is pure observability: after 2–4 weeks of live operation post-replay pre-training, the registry reveals which condition combinations have real edge.
-
-**Scope:** New table or in-memory structure in `history-service`. New `GET /analytics/win-conditions` endpoint.
-
-**Prerequisites:** Phase 35-36 guards must be active (ensures clean data — no invalid tradeDirection in history). Minimum 30 resolved trades.
-
-**Risk level:** LOW. Purely additive analytics layer.
+**Files changed:** `OrchestratorService.java` (`buildDecision()`) — 5 gate blocks inserted after `DivergenceGuard.evaluate()`.
 
 ---
 
-## Phase 38b — WinConditionRegistry (Active) (PLANNED)
+## Phase 36 — TradeEligibilityGuard ✅ COMPLETED 2026-02-28
 
-**Goal:** Promote the WinConditionRegistry from observability to enforcement. If a proposed trade's condition combination has a historical win rate below threshold (e.g., <40%), the signal is downgraded to HOLD regardless of AI recommendation.
+**Goal:** Hard eligibility gate requiring ALL conditions to be met before a BUY or SELL reaches persistence. More specific than Phase 35's multi-filter — adds regime and positive/negative bias requirements.
 
-**Prerequisites:** Phase 38a with at least 6 months of Angel One data (~50K+ candles). Win-rate estimates must be statistically stable (≥30 resolved outcomes per condition combination).
+**Placement:** After Phase-35 Gate 5, before `FinalDecision.v9()`.
+
+**BUY eligible only if ALL:**
+- `session ∈ {OPENING_BURST, POWER_HOUR}`
+- `regime ∈ {VOLATILE, TRENDING}`
+- `directionalBias ∈ {BULLISH, STRONG_BULLISH}`
+- `confidence ≥ 0.65`
+- `divergenceFlag = false`
+
+**SELL eligible only if ALL:**
+- `session = OPENING_BURST`
+- `regime = VOLATILE`
+- `directionalBias ∈ {BEARISH, STRONG_BEARISH}`
+- `confidence ≥ 0.65`
+- `divergenceFlag = false`
+
+Everything else → WATCH.
+
+**Replay result:** 421 trades (↓3% from Phase 35's 434). Low reduction because in consensus-only replay with NIFTY50, OPENING_BURST/POWER_HOUR candles almost universally have VOLATILE regime + BULLISH bias — gate has more impact in live mode.
+
+**Log identifier:** `[Phase36-EligibilityGuard]`
+
+**Files changed:** `OrchestratorService.java` (`buildDecision()`) — Gate 6 block inserted after Gate 5.
+
+---
+
+## Phase 37 — AI Prompt SELL Bias Fix ✅ COMPLETED 2026-02-28
+
+**Goal:** Correct the implicit BUY bias in the AI prompt. Make SELL instructions in BEARISH markets equally explicit and assertive as BUY instructions in BULLISH markets. Remove session gating from prompt (single source of truth = code gates).
+
+**Problem identified:** Phase 35/36 replay showed SELL = 0 in consensus-only mode, but even in live mode the AI had weaker language for SELL than BUY:
+- Before: `BEARISH → "Prefer SELL when agent signals support it. Avoid BUY."` (weak)
+- After: `BEARISH → "Signal SELL when agent signals support it. The market is trending down. BUY is incorrect in this direction."` (assertive, symmetric with BULLISH)
+
+**Changes in `AIStrategistService.buildPrompt()`:**
+
+| Change | Before | After |
+|---|---|---|
+| Session gating | "Respond WATCH or HOLD only. Do NOT generate BUY/SELL." | Informational only — "Lower momentum period. Prefer WATCH unless strongly aligned." |
+| BEARISH rule | "Prefer SELL... Avoid BUY." | "Signal SELL. Market is trending down. BUY is incorrect." |
+| STRONG_BEARISH rule | "Only signal SELL. Do NOT signal BUY." | "Signal SELL. SELL = ENTER SHORT. BUY is incorrect." |
+| Trade direction note | Listed BUY/SELL as equal | Added: "Both BUY and SELL are valid. Match signal to directional bias." |
+
+**Replay:** Skipped — prompt-only change, no structural gate. Impact visible in live mode when AI Strategist runs on real bearish days.
+
+**Files changed:** `AIStrategistService.java` — `sessionSection` switch cases, `biasSection` switch cases, main recommendation text.
+
+---
+
+## Phase 38a — WinConditionRegistry (Passive) ✅ COMPLETED 2026-02-28
+
+**Goal:** Silently accumulate win/loss statistics per (tradingSession, marketRegime, directionalBias, signal) combination from live production trades. Pure data collection — no trade blocking. Lays the foundation for Phase 38b's evidence-based gate.
+
+**Key design decisions:**
+1. **LIVE_AI only** — `REPLAY_CONSENSUS_ONLY` rows excluded from registry. Replay data would bias the learning with consensus-only patterns, not real AI-driven signals.
+2. **BUY/SELL only** — WATCH/HOLD have no P&L outcome to learn from.
+3. **Non-fatal** — any registry failure is logged and swallowed; never blocks the main save pipeline.
+4. **Atomic UPSERT** — single SQL statement increments counts and recomputes `win_rate` inline, no read-modify-write race condition.
+
+**New `edge_conditions` table:**
+```sql
+UNIQUE KEY: (trading_session, market_regime, directional_bias, signal)
+Tracks: win_count, loss_count, total_count, win_rate
+Updated: after every resolved LIVE_AI BUY/SELL trade
+```
+
+**Call chain:**
+```
+resolveOutcomes()
+  → repository.save(d)
+  → rescoreAgentsByOutcome()    ← Phase 31 (agent learning)
+  → winConditionRegistry.record(saved)  ← Phase 38a (condition learning)
+```
+
+**Files changed:**
+
+| Module | File | Change |
+|---|---|---|
+| history-service | `schema.sql` | `edge_conditions` table with UNIQUE constraint |
+| history-service | NEW `model/EdgeCondition.java` | @Table entity |
+| history-service | NEW `repository/EdgeConditionRepository.java` | atomic upsertCondition() |
+| history-service | NEW `service/WinConditionRegistryService.java` | record() with all safety guards |
+| history-service | `service/HistoryService.java` | Inject registry; wire after rescoreAgentsByOutcome() |
+
+---
+
+## Phase 38b — WinConditionRegistry (Active) ⏳ BLOCKED
+
+**Goal:** Promote the WinConditionRegistry from data collection to enforcement. Conditions with insufficient samples or below-threshold win rate are blocked before reaching FinalDecision.
+
+**Gate logic (to be added in `OrchestratorService.buildDecision()` after Phase-36 gate):**
+- Condition `total_count < 20` → WATCH (insufficient statistical evidence)
+- Condition `win_rate < 0.52` → WATCH (no proven edge)
+- Otherwise → trade allowed through
+
+**Prerequisites:**
+1. Angel One API credentials configured
+2. 6-month NIFTY50 historical data loaded and replayed
+3. `edge_conditions` table must have ≥20 samples per (session, regime, bias, signal) combination
+4. `win_rate` must be statistically stable (not just 1 win out of 2 trades)
+
+**Implementation plan (when unblocked):**
+- Add `GET /api/v1/history/edge-conditions/{session}/{regime}/{bias}/{signal}` endpoint to history-service
+- Add `findByKey()` query to `EdgeConditionRepository`
+- Wire registry lookup in `OrchestratorService.buildDecision()` after Phase-36 gate
+- Gate: `if (edgeCondition == null || edgeCondition.totalCount < 20 || edgeCondition.winRate < 0.52) → WATCH`
+
+**Current state:** `edge_conditions` table is live and collecting from day 1 of live trading. No gate active yet.
+
+**Prerequisites:**
+- Angel One API credentials configured (~2 days, as noted)
+- Minimum 2 weeks live trading after Angel One goes live
+- Paper trading period required before live capital (per roadmap rules).
 
 **Risk level:** MEDIUM. First data-driven autonomous override that does not rely on AI or consensus — pure historical pattern enforcement.
 
