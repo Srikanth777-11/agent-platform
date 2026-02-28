@@ -287,6 +287,9 @@ public class AIStrategistService {
         String sessionSection = "";
         if (omegaCtx != null && omegaCtx.tradingSession() != null) {
             sessionSection = switch (omegaCtx.tradingSession()) {
+                case OPENING_PHASE_1      -> "\nTrading Session: OPENING PHASE 1 (09:15–09:25) — Price discovery, high noise. STRONG bias required. Strict confidence gates apply.\n";
+                case OPENING_PHASE_2      -> "\nTrading Session: OPENING PHASE 2 (09:25–09:40) — Prime scalping window. BUY and SELL both valid when directional bias supports them.\n";
+                case OPENING_PHASE_3      -> "\nTrading Session: OPENING PHASE 3 (09:40–10:15) — Continuation or trap. Momentum must be RISING. Avoid reversals.\n";
                 case OPENING_BURST        -> "\nTrading Session: OPENING BURST — Active scalping window. BUY and SELL signals are both valid when directional bias supports them.\n";
                 case POWER_HOUR           -> "\nTrading Session: POWER HOUR — Active scalping window. BUY and SELL signals are both valid when directional bias supports them.\n";
                 case MIDDAY_CONSOLIDATION -> "\nTrading Session: MIDDAY CONSOLIDATION — Lower momentum period. Prefer WATCH unless agent signals are strongly aligned.\n";

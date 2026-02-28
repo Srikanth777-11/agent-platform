@@ -551,7 +551,7 @@ public class HistoryService {
                 h.getMarketRegime(), h.getDivergenceFlag(), h.getAiReasoning(), h.getSavedAt(),
                 h.getTradingSession(), h.getEntryPrice(), h.getTargetPrice(),
                 h.getStopLoss(), h.getEstimatedHoldMinutes(),
-                h.getTradeDirection(), h.getDirectionalBias()
+                h.getTradeDirection(), h.getDirectionalBias(), h.getOutcomeLabel()
             ))
             .doOnComplete(() -> log.debug("Snapshot query completed"))
             .doOnError(e -> log.error("Failed to fetch latest snapshot", e));

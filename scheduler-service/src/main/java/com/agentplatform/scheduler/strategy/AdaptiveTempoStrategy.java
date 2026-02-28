@@ -14,7 +14,8 @@ import java.time.Instant;
  * <ul>
  *   <li>OFF_HOURS            — pause 30 min (no signals needed, saves API quota)</li>
  *   <li>MIDDAY_CONSOLIDATION — fixed 15 min (maintain state, suppress BUY/SELL via AI)</li>
- *   <li>OPENING_BURST        — regime-driven (30s–2min)</li>
+ *   <li>OPENING_PHASE_1/2/3  — regime-driven (30s–2min) [Phase-40 micro-sessions]</li>
+ *   <li>OPENING_BURST        — regime-driven (30s–2min) [backward compat alias]</li>
  *   <li>POWER_HOUR           — regime-driven (30s–2min)</li>
  * </ul>
  */
@@ -36,7 +37,9 @@ public final class AdaptiveTempoStrategy {
         return switch (session) {
             case OFF_HOURS            -> OFF_HOURS_INTERVAL;
             case MIDDAY_CONSOLIDATION -> MIDDAY_INTERVAL;
-            case OPENING_BURST, POWER_HOUR -> resolveByRegime(regime);
+            // Phase-40 micro-sessions + legacy alias + POWER_HOUR: all regime-driven
+            case OPENING_PHASE_1, OPENING_PHASE_2, OPENING_PHASE_3,
+                 OPENING_BURST, POWER_HOUR -> resolveByRegime(regime);
         };
     }
 
